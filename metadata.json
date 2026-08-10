@@ -1,0 +1,6 @@
+{
+  "name": "GitHub ZIP Uploader",
+  "description": "Upload a ZIP file and automatically extract and push its contents directly to a selected GitHub repository.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
