@@ -31,6 +31,6 @@ Push ZIP archives directly to GitHub repositories without Git CLI.
 
 ## Live Demo
 
-https://myappzip.onrender.com
+https://ziptogit.in
 
 follow developer on Instagram - https://www.instagram.com/_dipesh_08
