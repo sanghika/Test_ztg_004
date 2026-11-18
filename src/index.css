@@ -1,26 +1,408 @@
 @import "tailwindcss";
 
+/* ==========================================================================
+   Fonts (self-hosted, no third-party requests)
+   Files live in public/fonts and are Latin subsets in woff2 (about 21 KB per
+   Inter weight, 20 KB for the mono), so nothing blocks rendering on another
+   origin. index.html preloads the three Inter weights; server.ts caches
+   /fonts for a year, so a changed font MUST get a new file name (bump the
+   version in it). Licences: Inter-OFL.txt and JetBrainsMono-OFL.txt, same folder.
+   font-display: swap shows text straight away in the fallback face below and
+   swaps once Inter arrives.
+   ========================================================================== */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/inter-4.0-latin-400.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/inter-4.0-latin-500.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/inter-4.0-latin-600.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-2.211-latin-400.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD, U+2190, U+2192;
+}
+
+/* Metric-matched fallback for Inter. Arial is wider/narrower and sits higher or
+   lower than Inter, so a plain system stack reflows the page when Inter swaps
+   in. size-adjust scales Arial to Inter's average character width (measured on
+   this app's own copy) and the three overrides move the baseline to where
+   Inter's would be, so the swap barely moves anything. There is one face per
+   weight because the numbers differ (Inter Medium is wider than Inter Regular,
+   and 600 maps to Arial Bold); a single face would make the browser fake the bold.
+   If you change the Inter files, re-measure these numbers.
+   Phones without Arial (Android) skip this face and use the stack after it. */
+@font-face {
+  font-family: "Inter Fallback";
+  font-weight: 400;
+  src: local("Arial"), local("ArialMT"), local("Liberation Sans");
+  size-adjust: 106.9%;
+  ascent-override: 90.6%;
+  descent-override: 22.6%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "Inter Fallback";
+  font-weight: 500;
+  src: local("Arial"), local("ArialMT"), local("Liberation Sans");
+  size-adjust: 108%;
+  ascent-override: 89.7%;
+  descent-override: 22.3%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "Inter Fallback";
+  font-weight: 600;
+  src: local("Arial Bold"), local("Arial-BoldMT"), local("Liberation Sans Bold");
+  size-adjust: 101.3%;
+  ascent-override: 95.6%;
+  descent-override: 23.8%;
+  line-gap-override: 0%;
+}
+
 /* Class-based dark mode (Tailwind v4 has no config file, so the variant is
-   declared here). The `dark` class is only ever added to <html> when the
-   viewport matches the desktop breakpoint — see useDesktopTheme() in
-   App.tsx — so this can never affect the mobile experience, even though a
-   few components (Footer, repoSection, archiveSection, FileTreeView) are
-   shared between the mobile card and the desktop dashboard. */
+   declared here). The `dark` class is set on <html> at every width: the first
+   visit follows the OS setting (prefers-color-scheme), and the theme toggle
+   stores an explicit choice that wins afterwards. See useTheme() in App.tsx;
+   the inline script in index.html applies the same rule before first paint so
+   there is no light flash. */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* ==========================================================================
+   Design tokens
+   Everything visual in App.tsx should come from here. If you need a value
+   that isn't below, add a token — don't reach for text-[13px], bg-[#...] or
+   rounded-[...]. `--text-*` and `--radius-*` are reset first so the old
+   Tailwind defaults (text-xs, text-3xl, rounded-3xl, ...) can’t creep back in.
+   ========================================================================== */
 @theme {
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* ---- Typefaces -----------------------------------------------------------
+     sans  Inter (self-hosted, see @font-face at the top of this file). Tailwind's
+           preflight points <html> at --font-sans (and form controls inherit
+           it), so setting it here restyles the whole app. "Inter Fallback" is the
+           size-adjusted Arial that shows while Inter loads; the rest of the
+           stack is only for glyphs Inter lacks and for if the font fails.
+     mono  JetBrains Mono, 400 only. Mono is for text where each character has
+           to be read exactly: the repo-name inputs, the file names in the file
+           tree, the "type X to confirm" name and the demo terminal. It is NOT
+           used in headings, the breadcrumb or running prose: at the same px
+           size it is wider and looks heavier than Inter.                       */
+  --font-sans: "Inter", "Inter Fallback", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* ---- Type scale (4 steps) -------------------------------------------------
+     SIZE (what each step is for)
+     sm   14/20  app UI and the minimum for real text: labels, buttons, links,
+                 inputs, nav, hints, alerts, footer, eyebrows, avatar initial.
+                 Nothing in the app is smaller than this.
+     base 16/24  reading text (content pages, FAQ answers), step and block
+                 titles, primary CTA, drop-zone title, wordmark
+     lg   18/28  content-page headings: section headings (Privacy, Terms),
+                 How it works steps, FAQ questions
+     2xl  24/32  page titles. ONE size for every h1: the dashboard, the signed-out
+                 card, the phone header and every content page. It is 8px above
+                 step titles (16) and 6px above content-page headings (18).
+
+     WEIGHT   semibold 600 = headings only: h1, h2, step titles, block titles
+              medium   500 = everything else that has to stand out: controls
+                             (buttons, nav and the active nav item, pills,
+                             links), field labels, names, the wordmark, the
+                             drop-zone title, step numbers
+              normal   400 = body, helper text, alerts, eyebrows
+              (bold is not used.) If semibold appears on something that is not
+              a heading, it is a bug: weight is what tells you what ranks higher.
+     TRACKING tight on h1 and the wordmark; wide on uppercase eyebrows; default
+              everywhere else.
+     LEADING  every line-height is a multiple of 4px. Normally it is the one that
+              comes with the size token (14/20, 16/24, 18/28, 24/32). Two
+              exceptions, both set on purpose: 16px reading prose is 28px
+              (leading-7) and a multi-line 14px paragraph with no leading icon is
+              24px (leading-6). Never leading-relaxed, -snug or -loose: they give
+              fractional pixels (14px becomes 22.75px, 16px becomes 26px).
+     The roles that repeat are defined once, as the `T` object in App.tsx.   */
+  --text-*: initial;
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 1rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg: 1.125rem;
+  --text-lg--line-height: 1.75rem;
+  --text-2xl: 1.5rem;
+  --text-2xl--line-height: 2rem;
+
+  /* ---- Radii (3 steps + rounded-full; replaces lg/xl/2xl/md mix) ----------
+     control 10px  buttons, inputs, selects, pills, alerts, small icon tiles
+     panel   12px  nested containers: drop zone, file chip, repo/file panels,
+                   FAQ + contact boxes, 48px icon tile
+     card    16px  top-level cards and the 56px logo tile                   */
+  --radius-*: initial;
+  --radius-control: 0.625rem;
+  --radius-panel: 0.75rem;
+  --radius-card: 1rem;
+
+  /* ---- Container widths (4 layout widths + 1 text measure) -------------------
+     content   672  every content page (how it works, FAQ, privacy, terms, contact)
+                    AND the home card on tablets (sm to lg)
+     app       900  the desktop app card on the home screen (lg and up)
+     app-sm    420  the phone app card (below sm)
+     copy      384  measure of short copy beside a button (the signed-out panel)
+     The header row and the footer are capped at the width of the card they sit
+     with (see W_CONTENT / W_HOME in App.tsx), so a screen has ONE left edge:
+     the logo is on the card's edge. The old 1152 `shell` width is retired.
+     Use max-w-content / max-w-app / max-w-app-sm / max-w-copy; don't add
+     another width without retiring one.                                      */
+  --container-copy: 24rem;
+  --container-content: 42rem;
+  --container-app: 56.25rem;
+  --container-app-sm: 26.25rem;
+
+  /* ---- Spacing and control sizing (rules, not tokens) -----------------------
+     GRID     4px. Use steps 1 2 3 4 6 8 12 16 (4 8 12 16 24 32 48 64px).
+              No half steps and no 5, 7, 10. The single exception is mt-0.5 (2px),
+              which lines a 16px icon up with a 20px line of text.
+     GAP      2 related items (icon + label, a row of toggles)
+              3 a small group (logo tile + wordmark, avatar + name)
+              4 / 6 siblings (cards in a list / steps in a sequence)
+     PADDING  3  inline alert or notice
+              4  nested panel, file chip, danger zone
+              6  info box (FAQ item, contact box) and every card on phones
+              8  app card on desktop, drop zone from sm up
+              12 content-page card from sm up
+     STACK    8 between form sections and before a danger zone; 3 between a
+              step heading and its block; 6 under a page h1 / after a header
+     CONTROLS every button, input and select is h-11 (44px) with px-4. 44px is
+              also the touch-target minimum, so nothing smaller is tappable.
+              Small visuals (the 32px theme toggle, 16px checkboxes and chevrons)
+              keep their size but get a 44px hit area from the control around them.
+     HEADER   one row (py-6, 44px of content) on every page, with the same
+              gutter as <main> (px-4, px-6 from sm) and the card's width, so the
+              logo sits on the card's left edge.
+     ICONS    lucide only (no hand-drawn SVG), three sizes: w-4 (16px) beside
+              text-sm, w-5 (20px) in icon buttons and tiles, w-6 (24px) for
+              spinners and the large brand mark.
+     BRAND    <BrandMark> is the only logo: one 28px tile (radius-control), in the
+              page header. Never a circle, never another size or radius; the home
+              card, the sidebar and the content pages do not repeat it.
+     STEPS    <StepBadge> is the only numbered badge (24px, outlined), shared by
+              the home screen's steps and the "How it works" list.
+     NAV      NAV_LINKS in App.tsx is the only link list: header (inline from
+              sm, a menu below sm) on every page; the footer adds the legal pages.
+     MESSAGES <Alert variant="error|success|warning"> is the only inline
+              message: p-3, text-sm, 1px border, 16px icon. No bare red text.
+              Error is for something that FAILED; a warning about what an action
+              will do is plain text in the surface that holds it.
+     BUTTONS  one Cancel (<CancelButton>, secondary, first in its row, flex-1)
+              and two destructive weights: solid red (BTN_DANGER) for what cannot
+              be undone, red outline (BTN_DANGER_OUTLINE) for what can.      */
+  /* ---- Colours -------------------------------------------------------------
+     BRAND is indigo. It is the logo tile and every filled primary button, so the identity has a hue
+     of its own instead of near-black (#111827) everywhere. Ink is now only for
+     headings, the terminal and the darkest surfaces. In dark mode the brand is
+     a lighter indigo with ink text; it used to flip to white slabs, which are
+     17:1 against the card and glare. Indigo is also the keyboard focus ring.
+     Green = success, red = errors and destructive, amber = warnings. slate-900
+     is pinned to ink so `text-slate-900` and `text-ink` can't be two blacks.
+
+     ink          near-black text colour (same in light and dark)
+     canvas       page background (switches). A COOL grey in light: it sits under
+                  slate borders, panels and the sidebar, so the whole UI is one
+                  temperature (the old beige was warm under blue-grey). The footer
+                  has no band of its own, it shows the canvas in both themes.
+     surface      card background (switches)
+     primary      filled-button, badge and logo-tile colour (switches)
+     on-primary   text/icon colour on primary: 7.9:1 light, 6.0:1 dark
+     muted        ALL secondary text: helper text, nav, footer, descriptions,
+                  field-adjacent hints. slate-600 in light = 7.6:1 on white and
+                  6.7:1 on the canvas (slate-500 was 4.8:1 and 4.4:1); slate-400
+                  in dark = 6.5:1 on the card, 7.3:1 on the page.
+     field        border for interactive controls, 3.3:1+ (see .dark)
+     edge         border of every container: card, nested panels, menus, the
+                  danger zone's base. Light 2.6:1 on white / 2.3:1 on the canvas,
+                  dark 2.3:1 on the card / 2.5:1 on the page.
+     edge-subtle  dividers inside a surface: sidebar, footer, header separator.
+                  1.65:1 on white (light) and on the card (dark).
+     disabled / on-disabled
+                  flat disabled button fill and its text: 6.2:1 in light, 6.1:1
+                  in dark (it was 4.4-4.8:1 in dark).
+     tint-1 / tint-2 / tint-3 / input / lift
+                  EVERY translucent or tinted fill on a surface, so no component
+                  writes its own slate-N or white/[alpha] pair. Light is slate
+                  50 / 100 / 200 (input and lift: white); dark is white at 3%,
+                  6% and 10% (input 4%, lift 10%). There are exactly these four
+                  dark alphas in the app (plus the always-dark terminal's own
+                  white/10).
+                  tint-1  resting panel: sidebar, nested panels, FAQ/contact
+                          boxes, the terminal's column
+                  tint-2  hover on a surface, the segmented track, drop-zone
+                          drag state, icon tiles
+                  tint-3  active nav item, hover on the canvas or sidebar,
+                          avatar, progress track
+                  input   fields and outlined buttons
+                  lift    the active segment (with elevation-control)
+                  Borders are the solid edge / edge-subtle / field tokens above;
+                  there are no white-alpha borders.
+     cta-disabled / on-cta-disabled
+                  the same idea for the ONE main button ("Push files") only: a
+                  brand-tinted fill (primary at ~14% / 18%) with brand text, 6.3:1
+                  light, 6.5:1 dark, so the page's main action never looks like
+                  an ordinary disabled control.                                */
+  --color-slate-900: #111827;
+  --color-ink: #111827;
+  --color-canvas: #eef1f6;
+  --color-surface: #ffffff;
+  --color-primary: #4338ca;
+  --color-primary-hover: #3730a3;
+  --color-on-primary: #ffffff;
+  --color-muted: #45556c;
+  --color-field: #7a889d;
+  --color-edge: #94a3b8;
+  --color-edge-subtle: #c0cad9;
+  --color-disabled: #e2e8f0;
+  --color-on-disabled: #45556c;
+  --color-cta-disabled: #e5e3f8;
+  --color-on-cta-disabled: #4338ca;
+  --color-tint-1: #f8fafc;
+  --color-tint-2: #f1f5f9;
+  --color-tint-3: #e2e8f0;
+  --color-input: #ffffff;
+  --color-lift: #ffffff;
+}
+
+/* Dark values for the switching tokens above.
+   - canvas/surface: page #0B0F17, card #161C29 (1.13:1; the cards also get an
+     edge and an elevation, see CARD_EDGE in App.tsx)
+   - primary: indigo-400 with ink text (6.0:1), 5.7:1 against the card. Hover
+     indigo-300. No white slabs.
+   - muted: slate-400
+   - field: #64748b is 3.2-4.0:1 on the card, page, translucent inputs and the
+     toggle track.
+   - edge #475569 and edge-subtle #334155 (see the notes above)
+   - on-disabled #A8B5C9 on the 10% white fill is 6.1:1 on the card.          */
+.dark {
+  --color-canvas: #0b0f17;
+  --color-surface: #161c29;
+  --color-primary: #818cf8;
+  --color-primary-hover: #a5b4fc;
+  --color-on-primary: #111827;
+  --color-muted: #90a1b9;
+  --color-field: #64748b;
+  --color-edge: #475569;
+  --color-edge-subtle: #334155;
+  --color-disabled: rgb(255 255 255 / 0.1);
+  --color-on-disabled: #a8b5c9;
+  --color-cta-disabled: #29304e;
+  --color-on-cta-disabled: #a5b4fc;
+  --color-tint-1: rgb(255 255 255 / 0.03);
+  --color-tint-2: rgb(255 255 255 / 0.06);
+  --color-tint-3: rgb(255 255 255 / 0.1);
+  --color-input: rgb(255 255 255 / 0.04);
+  --color-lift: rgb(255 255 255 / 0.1);
+}
+
+/* One shared keyboard-focus indicator for every interactive element.
+   Replaces the old per-component `focus:ring-slate-100/200` + `outline-none`
+   combos (~1.1-1.2:1, invisible) and the one-off ring on the theme toggle.
+   Light: indigo-600 (>=5.7:1 on white / page / slate-50 / red-50).
+   Dark:  indigo-400 (>=4.9:1 on the dark card, page, panels, toggle track).
+   :focus-visible keeps it keyboard-only for buttons/links, but text inputs
+   still show it on click, which is what you want while typing. */
+@layer base {
+  :root {
+    --focus-ring: #4f46e5;
+    color-scheme: light;
+    --scrollbar-thumb: #94a3b8;
+
+    /* Elevation: three levels, one recipe each, used everywhere (no ad-hoc
+       shadow-* classes in App.tsx). Tinted with ink, not slate-200, so they
+       register on the beige canvas.
+       control  active segment / toggle knob. The SAME three layers in both
+                themes: a 1px drop, a hairline ring, a 1px top highlight. Only
+                the colours change (ink shadow + white highlight in light, black
+                shadow + white ring and highlight in dark), so a segment lifts
+                the same way whichever theme you are in.
+       card     every top-level card (home on desktop and phone, content pages)
+       raised   things that float above a card: the mobile menu. Nothing that
+                sits inside a card (the demo terminal) gets a shadow; it has a
+                border.                                                       */
+    --elevation-control: 0 1px 2px rgb(17 24 39 / 0.12), 0 0 0 1px rgb(17 24 39 / 0.05), inset 0 1px 0 rgb(255 255 255 / 0.8);
+    --elevation-card: 0 1px 2px rgb(17 24 39 / 0.06), 0 8px 24px -4px rgb(17 24 39 / 0.14);
+    --elevation-raised: 0 2px 4px rgb(17 24 39 / 0.08), 0 12px 32px -6px rgb(17 24 39 / 0.24);
+  }
+  .dark {
+    --focus-ring: #818cf8;
+    color-scheme: dark;
+    --scrollbar-thumb: #475569;
+
+    /* Dark: a black shadow on near-black is invisible (the card is only 1.13:1
+       against the canvas, and lightening it would cost the 6:1 text contrast
+       the tokens above are tuned to), so the card lifts with light instead: a
+       1px highlight along its top edge, plus a faint cool glow that lifts the
+       canvas just around it (no black shadow can do that). The deep shadow
+       stays underneath for the part of the canvas that is not near-black
+       (the dot grid, the footer). Controls keep the light-theme recipe
+       (drop, ring, highlight) in dark colours. */
+    --elevation-control: 0 1px 2px rgb(0 0 0 / 0.5), 0 0 0 1px rgb(255 255 255 / 0.1), inset 0 1px 0 rgb(255 255 255 / 0.1);
+    --elevation-card: inset 0 1px 0 rgb(255 255 255 / 0.08), 0 1px 2px rgb(0 0 0 / 0.5), 0 24px 48px -16px rgb(0 0 0 / 0.8), 0 0 48px -12px rgb(148 163 184 / 0.16);
+    --elevation-raised: inset 0 1px 0 rgb(255 255 255 / 0.08), 0 20px 44px -12px rgb(0 0 0 / 0.85);
+  }
+  /* color-scheme above also darkens native scrollbars, form controls and the
+     select popup. The html background means overscroll and the moment before
+     React mounts show the page colour instead of white. */
+  html {
+    background-color: var(--color-canvas);
+  }
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
 }
 
 @layer utilities {
+  .elevation-control {
+    box-shadow: var(--elevation-control);
+  }
+  .elevation-card {
+    box-shadow: var(--elevation-card);
+  }
+  .elevation-raised {
+    box-shadow: var(--elevation-raised);
+  }
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
   .custom-scrollbar::-webkit-scrollbar {
-    width: 6px;
+    width: 8px;
   }
   .custom-scrollbar::-webkit-scrollbar-track {
     background: transparent;
   }
   .custom-scrollbar::-webkit-scrollbar-thumb {
-    background-color: #cbd5e1;
+    background-color: var(--scrollbar-thumb);
     border-radius: 20px;
   }
 }
@@ -76,26 +458,86 @@
   }
 }
 
+/* A ring that grows out of the 10px stage dot and fades. It scales a bordered
+   element (transform + opacity only, so the compositor can run it) instead of
+   animating box-shadow, which repaints every frame. 2.6 = (10px dot + 8px
+   spread on each side) / 10px, the size the old box-shadow ring reached. */
 @keyframes ztg-pulse-ring {
   0% {
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5);
+    transform: scale(1);
     opacity: 0.5;
   }
   100% {
-    box-shadow: 0 0 0 8px transparent;
+    transform: scale(2.6);
     opacity: 0;
   }
+}
+
+/* Set by ZipToGitTerminal while it is off screen or the tab is hidden, so the
+   infinite blink and pulse ring stop costing frames. */
+.ztg-paused,
+.ztg-paused * {
+  animation-play-state: paused !important;
 }
 
 /* Blanket reduced-motion fallback — the decorative flourishes above are
    inline-styled (per-instance animation-delay), so they can't be targeted by
    class selectors here; this collapses any CSS animation on the page to a
-   single instant frame instead. The stage-to-stage progression itself is
-   driven by JS state/timers and is unaffected, since it's the core mechanic
-   being demonstrated, not a flourish. */
+   single instant frame instead. ZipToGitTerminal also checks the same media
+   query in JS and, when motion is reduced, stops its timer and holds on the
+   finished state (all four stages complete) rather than looping. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
   }
+}
+
+/* Returning visitor on "/" (see the has_session script in index.html).
+   The prerendered HTML always contains the signed-out hero. For someone whose
+   has_session flag is set, index.html adds .session-pending to <html>: the hero
+   is hidden (visibility keeps its space, so nothing shifts) and a CSS spinner
+   sits in the card until React takes over, which removes the class in the same
+   frame it renders its own spinner or the dashboard. */
+html.session-pending [data-signed-out] {
+  visibility: hidden;
+}
+html.session-pending [data-auth-card] {
+  position: relative;
+}
+html.session-pending [data-auth-card]::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin: -0.75rem 0 0 -0.75rem;
+  border: 2px solid var(--color-muted);
+  border-top-color: transparent;
+  border-radius: 9999px;
+  animation: ztg-spin 1s linear infinite;
+}
+@keyframes ztg-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Dot-grid texture behind the desktop home screen (see HomeLayout in App.tsx).
+   One static SVG per theme instead of a CSS radial-gradient plus mask-image:
+   a 28px pattern of 2px dots, multiplied by a radial fade (ellipse 80% x 60%
+   of the box, centred at 50% 40%, gone at 75% of the radius). The SVG has no
+   fixed size, so background-size: 100% 100% makes it exactly as big as the
+   layer and the 28px pitch stays 28 CSS px. Colours cannot come from CSS
+   variables inside an SVG image, so they are written in: light is ink
+   rgb(15 23 42) at 32%, dark is slate rgb(148 163 184) at 36% (about 2:1 against
+   the canvas at the centre). If you change them, change both files' fill and
+   fill-opacity. The dark rule is the only place the .dark class is needed. */
+.dot-grid {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25'%3E%3Cdefs%3E%3Cpattern id='p' width='28' height='28' patternUnits='userSpaceOnUse'%3E%3Ccircle cx='14' cy='14' r='1.05' fill='rgb(15,23,42)' fill-opacity='.32'/%3E%3C/pattern%3E%3CradialGradient id='f' cx='.5' cy='.4' r='.8' gradientTransform='translate(.5 .4) scale(1 .75) translate(-.5 -.4)'%3E%3Cstop offset='0' stop-color='%23fff'/%3E%3Cstop offset='.75' stop-color='%23000'/%3E%3C/radialGradient%3E%3Cmask id='m'%3E%3Crect width='100%25' height='100%25' fill='url(%23f)'/%3E%3C/mask%3E%3C/defs%3E%3Crect width='100%25' height='100%25' fill='url(%23p)' mask='url(%23m)'/%3E%3C/svg%3E");
+  background-size: 100% 100%;
+}
+.dark .dot-grid {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25'%3E%3Cdefs%3E%3Cpattern id='p' width='28' height='28' patternUnits='userSpaceOnUse'%3E%3Ccircle cx='14' cy='14' r='1.05' fill='rgb(148,163,184)' fill-opacity='.36'/%3E%3C/pattern%3E%3CradialGradient id='f' cx='.5' cy='.4' r='.8' gradientTransform='translate(.5 .4) scale(1 .75) translate(-.5 -.4)'%3E%3Cstop offset='0' stop-color='%23fff'/%3E%3Cstop offset='.75' stop-color='%23000'/%3E%3C/radialGradient%3E%3Cmask id='m'%3E%3Crect width='100%25' height='100%25' fill='url(%23f)'/%3E%3C/mask%3E%3C/defs%3E%3Crect width='100%25' height='100%25' fill='url(%23p)' mask='url(%23m)'/%3E%3C/svg%3E");
 }

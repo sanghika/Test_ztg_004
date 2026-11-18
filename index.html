@@ -12,41 +12,95 @@
     <meta name="robots" content="index, follow" />
     <link rel="canonical" href="https://ziptogit.in/" />
     
-    <!-- Favicon: SVG (tiny, scales natively) for browsers, small PNG for iOS home screen -->
+    <!-- Favicon: a real vector SVG (about 1 KB; it also switches to light ink in a
+         dark browser theme) for current browsers, a 3-size ICO (16/32/48) for
+         browsers and crawlers that do not use SVG icons, and a small PNG for the iOS
+         home screen. Keep the SVG free of embedded bitmaps: it used to be a 512px
+         PNG inside an SVG wrapper (172 KB). -->
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <meta name="theme-color" content="#0B1120" />
+    <meta name="theme-color" content="#eef1f6" />
+    <!-- Theme, applied before first paint so there is no light flash. Same rule
+         as getInitialTheme() in src/App.tsx: stored choice, else the OS setting. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("ziptogit-theme");
+          var dark = t ? t === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+          if (dark) document.documentElement.classList.add("dark");
+          var m = document.querySelector('meta[name="theme-color"]');
+          if (m) m.setAttribute("content", dark ? "#0b0f17" : "#eef1f6");
+        } catch (e) {}
+      })();
+    </script>
 
-    <!-- Typography: JetBrains Mono for the code/diff-styled elements on desktop -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-    
+    <!-- Returning visitor on "/": the server sets a readable has_session=1 cookie
+         next to the HttpOnly session cookie. If it is present, (1) mark <html> so
+         index.css hides the prerendered signed-out hero (a signed-in person must
+         not see "Connect your GitHub account" flash up) and shows a spinner in its
+         place, (2) preconnect to the avatar host, and (3) start GET /api/bootstrap (user + first page of repos) right
+         now, so it runs in parallel with the JS download instead of after it.
+         fetchBootstrap() in src/lib/github.ts takes the result from
+         window.__ZTG_BOOT__. Without the flag there is nothing to wait
+         for: the hero is already in the HTML and no request is made at all.
+         Only on "/", the only page that shows account state. -->
+    <script>
+      (function () {
+        try {
+          if (location.pathname !== "/") return;
+          if (!/(?:^|;\s*)has_session=1(?:;|$)/.test(document.cookie)) return;
+          document.documentElement.classList.add("session-pending");
+          // The signed-in screen shows the GitHub avatar from this host (see
+          // src/lib/avatar.ts). Open the connection now, alongside /api/bootstrap,
+          // so it is ready when the image is requested. Only returning visitors
+          // get this: a signed-out visitor never loads an avatar, so for them a
+          // preconnect would be a wasted connection. No crossorigin: <img> is a
+          // no-cors request and would not reuse a crossorigin connection.
+          var pc = document.createElement("link");
+          pc.rel = "preconnect";
+          pc.href = "https://avatars.githubusercontent.com";
+          document.head.appendChild(pc);
+          window.__ZTG_BOOT__ = fetch("/api/bootstrap", { credentials: "include" }).then(function (res) {
+            return res.json().then(
+              function (body) { return { ok: res.ok, status: res.status, body: body }; },
+              function () { return { ok: res.ok, status: res.status, body: null }; }
+            );
+          });
+        } catch (e) {}
+      })();
+    </script>
+
+    <!-- Typography: Inter is the UI typeface (400 body, 500 controls, 600 headings;
+         bold is not used) and JetBrains Mono (400) is only for text that must be
+         read character by character. Both are self-hosted Latin subsets in
+         /public/fonts, declared with @font-face in src/index.css (see the notes
+         there), so there is no request to Google Fonts. The three Inter weights
+         are preloaded because all of them are used above the fold; the mono is
+         not, it only shows in the file tree, inputs and the desktop terminal.
+         crossorigin is required on font preloads, even for same-origin files. -->
+    <link rel="preload" href="/fonts/inter-4.0-latin-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/inter-4.0-latin-500.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/inter-4.0-latin-600.woff2" as="font" type="font/woff2" crossorigin />
+
     <!-- Open Graph Tags -->
     <meta property="og:title" content="ZiptoGit - Fast ZIP to GitHub Pushing" />
     <meta property="og:description" content="Securely upload your AI Studio ZIP exports and push their extracted contents directly to your GitHub repositories online." />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://ziptogit.in/" />
-    <meta property="og:image" content="https://myappzip.onrender.com/social.jpg" />
+    <meta property="og:image" content="https://ziptogit.in/social.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
     
     <!-- Twitter / X Cards -->
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="ZiptoGit - Fast ZIP to GitHub Pushing" />
     <meta name="twitter:description" content="Securely upload your AI Studio ZIP exports and push their extracted contents directly to your GitHub repositories online." />
-    <meta name="twitter:image" content="https://myappzip.onrender.com/social.jpg" />
+    <meta name="twitter:image" content="https://ziptogit.in/social.jpg" />
     
-    <!-- Google Analytics (GA4) -->
-    <!-- Note: Replace ENABLE_GA_TRACKING_ID with your actual GA4 measurement ID in production -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=G-TRACKING_ID"></script>
-    <script>
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      gtag('js', new Date());
-      // A mechanism in App.tsx or environment config could override this ID
-      gtag('config', window.VITE_GA_MEASUREMENT_ID || 'G-TRACKING_ID', {
-        page_path: window.location.pathname,
-      });
-    </script>
+    <!-- Analytics is not loaded from this file. src/lib/analytics.ts adds Google
+         Analytics after the page has loaded, and only when VITE_GA_MEASUREMENT_ID
+         is set to a real GA4 ID at build time. -->
   </head>
   <body>
     <div id="root"></div>

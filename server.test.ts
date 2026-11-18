@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
+import crypto from "crypto";
+import zlib from "zlib";
 import request from "supertest";
 import { createApp } from "./server";
 
@@ -37,10 +39,17 @@ describe("authenticated route protection", () => {
     expect(res.status).toBe(401);
   });
 
-  it("rejects POST /api/upload with no session cookie", async () => {
+  it("rejects POST /api/upload/blobs with no session cookie", async () => {
     const res = await request(app)
-      .post("/api/upload")
-      .send({ owner: "x", repo: "y", files: [] });
+      .post("/api/upload/blobs")
+      .send({ owner: "x", repo: "y", files: [{ path: "a.txt", content: "" }] });
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects POST /api/upload/commit with no session cookie", async () => {
+    const res = await request(app)
+      .post("/api/upload/commit")
+      .send({ owner: "x", repo: "y", entries: [{ path: "a.txt", sha: "a".repeat(40) }] });
     expect(res.status).toBe(401);
   });
 
@@ -133,9 +142,223 @@ describe("input validation on write routes", () => {
   // this just confirms an authenticated-but-malformed request wouldn't be a
   // 500. We can't fully exercise this without a real token, but a missing
   // body's rejection message logic is covered indirectly via the 401 above.
-  it("upload route requires owner, repo, and files even before hitting GitHub", async () => {
-    const res = await request(app).post("/api/upload").send({});
+  it("blobs route requires owner, repo, and files even before hitting GitHub", async () => {
+    const res = await request(app).post("/api/upload/blobs").send({});
     // Unauthenticated request is rejected before validation runs.
     expect(res.status).toBe(401);
+  });
+});
+
+// --- has_session flag cookie --- //
+// A readable companion to the HttpOnly gh_session cookie. It lets the page pick
+// between the hero and a spinner before /api/me answers. It carries no secret
+// and grants nothing; these tests pin down when it is set and cleared.
+
+// Builds a cookie the way cookie-parser expects a signed one ("s:" + value +
+// "." + base64 HMAC-SHA256 without padding), so tests can present a session
+// without going through GitHub.
+const signedCookie = (name: string, value: string, secret = "test_session_secret") => {
+  const sig = crypto.createHmac("sha256", secret).update(value).digest("base64").replace(/=+$/, "");
+  return `${name}=${encodeURIComponent(`s:${value}.${sig}`)}`;
+};
+const findCookie = (res: request.Response, name: string) =>
+  getSetCookies(res).find((c) => c.startsWith(`${name}=`));
+
+describe("has_session flag cookie", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("is set, readable by JS, next to an HttpOnly session when GitHub sign-in completes", async () => {
+    const urlRes = await request(app).get("/api/auth/url");
+    const cookies = getSetCookies(urlRes);
+    const state = urlRes.body.url.match(/state=([0-9a-f]+)/)?.[1];
+    vi.stubGlobal("fetch", vi.fn(async () => ({ json: async () => ({ access_token: "gho_test_token" }) })));
+
+    const res = await request(app).get(`/auth/callback?code=abc&state=${state}`).set("Cookie", cookies);
+
+    expect(res.status).toBe(200);
+    const session = findCookie(res, "gh_session");
+    const flag = findCookie(res, "has_session");
+    expect(session).toBeDefined();
+    expect(session).toContain("HttpOnly");
+    expect(flag).toBeDefined();
+    expect(flag).toMatch(/^has_session=1;/);
+    expect(flag).not.toContain("HttpOnly");
+    expect(flag).not.toContain("gho_test_token");
+  });
+
+  it("is added to a page request that carries a valid session but no flag (sessions from before the flag existed)", async () => {
+    const res = await request(app).get("/faq").set("Cookie", signedCookie("gh_session", "tok"));
+    expect(findCookie(res, "has_session")).toMatch(/^has_session=1;/);
+  });
+
+  it("is not re-sent when the flag is already there", async () => {
+    const res = await request(app)
+      .get("/faq")
+      .set("Cookie", [signedCookie("gh_session", "tok"), "has_session=1"]);
+    expect(findCookie(res, "has_session")).toBeUndefined();
+  });
+
+  it("is never granted for a forged or unsigned session cookie", async () => {
+    const forged = await request(app).get("/faq").set("Cookie", "gh_session=s%3Atok.not-a-valid-signature");
+    expect(findCookie(forged, "has_session")).toBeUndefined();
+    const plain = await request(app).get("/faq").set("Cookie", "gh_session=tok");
+    expect(findCookie(plain, "has_session")).toBeUndefined();
+  });
+
+  it("is not added to API calls or to file requests", async () => {
+    const session = signedCookie("gh_session", "tok");
+    const api = await request(app).get("/api/auth/url").set("Cookie", session);
+    expect(findCookie(api, "has_session")).toBeUndefined();
+    const file = await request(app).get("/robots.txt").set("Cookie", session);
+    expect(findCookie(file, "has_session")).toBeUndefined();
+  });
+
+  it("is retired by a 401, so a stale flag cannot keep sending the page into a spinner", async () => {
+    const res = await request(app).get("/api/me").set("Cookie", "has_session=1");
+    expect(res.status).toBe(401);
+    expect(findCookie(res, "has_session")).toMatch(/^has_session=;/);
+  });
+
+  it("is not touched by a 401 when there was no flag", async () => {
+    const res = await request(app).get("/api/me");
+    expect(res.status).toBe(401);
+    expect(findCookie(res, "has_session")).toBeUndefined();
+  });
+
+  it("is cleared together with the session on logout", async () => {
+    const res = await request(app).post("/api/logout");
+    expect(res.status).toBe(200);
+    expect(findCookie(res, "gh_session")).toMatch(/^gh_session=;/);
+    expect(findCookie(res, "has_session")).toMatch(/^has_session=;/);
+  });
+});
+
+// --- request body limits --- //
+// The default JSON cap is small because it applies to requests that may not be
+// authenticated yet; only /api/upload/blobs (large) and /api/upload/commit and
+// /api/delete-paths (long lists, more modest) accept big bodies, and only after
+// the rate limiter and requireAuth.
+describe("request body limits", () => {
+  const oversizedForDefault = "A".repeat(200 * 1024); // over the 100 KB default
+  const session = () => signedCookie("gh_session", "tok");
+
+  it("rejects an oversized JSON body on an ordinary route with a JSON 413", async () => {
+    const res = await request(app).post("/api/repos").send({ name: oversizedForDefault });
+    expect(res.status).toBe(413);
+    expect(res.body.message).toMatch(/too large/i);
+  });
+
+  it("does not parse a large body on /api/upload/blobs for an unauthenticated request", async () => {
+    const res = await request(app)
+      .post("/api/upload/blobs")
+      .send({ owner: "x", repo: "y", files: [{ path: "a.txt", content: oversizedForDefault }] });
+    // 401 (not 413): requireAuth answers before any body parser runs.
+    expect(res.status).toBe(401);
+  });
+
+  it("accepts a body over 100 KB on /api/upload/blobs once authenticated", async () => {
+    const res = await request(app)
+      .post("/api/upload/blobs")
+      .set("Cookie", session())
+      // An unsafe path makes the route answer 400 before it would call GitHub,
+      // which proves the large body was parsed rather than rejected as 413.
+      .send({ owner: "x", repo: "y", files: [{ path: "../evil.txt", content: oversizedForDefault }] });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/paths are invalid/i);
+  });
+
+  it("accepts a gzip-compressed body on /api/upload/blobs, as the client sends it", async () => {
+    const payload = JSON.stringify({
+      owner: "x",
+      repo: "y",
+      files: [{ path: "../evil.txt", content: oversizedForDefault }],
+    });
+    const res = await request(app)
+      .post("/api/upload/blobs")
+      .set("Cookie", session())
+      .set("Content-Type", "application/json")
+      .set("Content-Encoding", "gzip")
+      .send(zlib.gzipSync(payload));
+    // Reaching the route's own validation means the body was inflated and parsed.
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/paths are invalid/i);
+  });
+
+  it("accepts a list over 100 KB on /api/upload/commit once authenticated", async () => {
+    const entries = Array.from({ length: 2000 }, (_, i) => ({ path: `some/folder/file-${i}.txt`, sha: "a".repeat(40) }));
+    entries.push({ path: "../evil.txt", sha: "a".repeat(40) });
+    const res = await request(app).post("/api/upload/commit").set("Cookie", session()).send({ owner: "x", repo: "y", entries });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/paths are invalid/i);
+  });
+
+  // Each of these must be refused before the route would call GitHub.
+  it.each([
+    ["a malformed blob SHA", { path: "a.txt", sha: "not-a-sha" }],
+    ["an entry with neither a SHA nor content", { path: "a.txt" }],
+    ["an entry with both a SHA and content", { path: "a.txt", sha: "a".repeat(40), content: "hi" }],
+    ["empty inline content (GitHub reads it as 'no content')", { path: "a.txt", content: "" }],
+    ["non-string inline content", { path: "a.txt", content: 42 }],
+  ])("rejects %s on /api/upload/commit", async (_label, entry) => {
+    const res = await request(app)
+      .post("/api/upload/commit")
+      .set("Cookie", session())
+      .send({ owner: "x", repo: "y", entries: [entry] });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/valid blob SHA or non-empty text content/i);
+  });
+
+  it("accepts a body over 100 KB on /api/delete-paths once authenticated", async () => {
+    const paths = Array.from({ length: 5000 }, (_, i) => `some/folder/file-${i}.txt`);
+    paths.push("../evil.txt");
+    const res = await request(app)
+      .post("/api/delete-paths")
+      .set("Cookie", session())
+      .send({ owner: "x", repo: "y", paths });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/paths are invalid/i);
+  });
+});
+
+// A push makes one /blobs request per batch of files, so /blobs must not share
+// the 30-per-15-minutes budget of the write routes.
+describe("upload batch rate limiting", () => {
+  it("allows far more than the write-route cap of blob requests", async () => {
+    for (let i = 0; i < 35; i++) {
+      const res = await request(app).post("/api/upload/blobs").send({});
+      expect(res.status).toBe(401); // not 429
+    }
+  });
+});
+
+describe("TRUST_PROXY_HOPS (production only)", () => {
+  const build = async (hops?: string) => {
+    const before = { NODE_ENV: process.env.NODE_ENV, hops: process.env.TRUST_PROXY_HOPS };
+    process.env.NODE_ENV = "production";
+    if (hops === undefined) delete process.env.TRUST_PROXY_HOPS;
+    else process.env.TRUST_PROXY_HOPS = hops;
+    try {
+      return (await createApp()).get("trust proxy");
+    } finally {
+      process.env.NODE_ENV = before.NODE_ENV;
+      if (before.hops === undefined) delete process.env.TRUST_PROXY_HOPS;
+      else process.env.TRUST_PROXY_HOPS = before.hops;
+    }
+  };
+
+  it("trusts one proxy by default", async () => {
+    expect(await build()).toBe(1);
+  });
+
+  it("trusts as many as configured, e.g. a CDN in front of the host's load balancer", async () => {
+    expect(await build("2")).toBe(2);
+  });
+
+  it("ignores nonsense and falls back to one", async () => {
+    for (const bad of ["", "0", "-3", "abc"]) {
+      expect(await build(bad)).toBe(1);
+    }
   });
 });

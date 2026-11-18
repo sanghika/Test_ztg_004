@@ -1,14 +1,23 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import crypto from "crypto";
+import zlib from "zlib";
 import cookieParser from "cookie-parser";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
-import { createServer as createViteServer } from "vite";
 import * as githubService from "./server/githubService";
+import { createSessionData } from "./server/sessionData";
+import { scanPrecompressed, sendPrecompressed, servePrecompressed } from "./server/precompressed";
+import { hasFileExtension } from "./server/spaFallback";
 
 const TOKEN_COOKIE = "gh_session";
 const OAUTH_STATE_COOKIE = "oauth_state";
+// A readable (NOT HttpOnly) companion to the session cookie. It holds only "1"
+// and is never trusted for anything: it lets index.html and the client decide
+// between the hero and a spinner before the first API call has answered. The real session
+// is still the signed HttpOnly gh_session cookie, checked by requireAuth.
+const SESSION_FLAG_COOKIE = "has_session";
 
 /**
  * Builds and configures the Express app, without starting a listener.
@@ -25,7 +34,13 @@ export async function createApp() {
   if (isProd) {
     // Required for express-rate-limit (and secure cookies) to see the real
     // client IP when running behind Northflank's/Render's load balancer.
-    app.set("trust proxy", 1);
+    // That is one proxy. Put a CDN or another proxy in front of it and there
+    // are two: set TRUST_PROXY_HOPS=2, otherwise every visitor behind the same
+    // CDN edge appears to have the edge's IP and they all share one rate limit.
+    // Never set it higher than the number of proxies that really are there: a
+    // client can then put a made-up address in X-Forwarded-For.
+    const hops = Number.parseInt(process.env.TRUST_PROXY_HOPS ?? "", 10);
+    app.set("trust proxy", Number.isInteger(hops) && hops >= 1 ? hops : 1);
   }
 
   if (!isTest && !process.env.SESSION_SECRET) {
@@ -37,35 +52,29 @@ export async function createApp() {
   const cookieSecret = process.env.SESSION_SECRET || process.env.GITHUB_CLIENT_SECRET || "dev-only-insecure-secret";
 
   // Compresses JSON API responses and static assets (HTML/CSS/JS) on the
-  // wire. /api/upload and /api/delete-paths stream newline-delimited JSON
-  // progress events and rely on each res.write() reaching the client right
-  // away — compression buffers output, which would turn that live progress
-  // UI into stalled, chunky updates — so those two routes opt out.
+  // wire. /api/delete-paths streams newline-delimited JSON progress events and
+  // relies on each res.write() reaching the client right away — compression
+  // buffers output, which would turn that live progress UI into stalled,
+  // chunky updates — so that route opts out. (The /api/upload/* routes answer
+  // with one small JSON body each, so they compress like everything else.)
+  //
+  // Brotli quality is set here on purpose. The package's default is 4 (a
+  // balanced speed/size), but Node's own default is 11, which takes over half a
+  // second for a 300 KB file; pinning it keeps a future change of the package
+  // default from turning every response into a CPU spike. The built site does
+  // not go through this at all: scripts/precompress.mjs compresses it once at
+  // quality 11 and servePrecompressed (below) sends those files.
   app.use(
     compression({
+      brotli: { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 } },
       filter: (req, res) => {
-        if (req.path === "/api/upload" || req.path === "/api/delete-paths") return false;
+        if (req.path === "/api/delete-paths") return false;
         return compression.filter(req, res);
       },
     })
   );
 
   app.use(cookieParser(cookieSecret));
-  // Kept in sync with src/lib/uploadLimits.ts (MAX_TOTAL_UPLOAD_BYTES = 50MB
-  // of original file bytes). Base64 (+~33%) and JSON wrapper overhead mean
-  // the raw request body limit needs real headroom above that.
-  app.use(express.json({ limit: "75mb" }));
-
-  // Turns Express's default opaque error page for an oversized request body
-  // into a clear JSON message the client already knows how to surface.
-  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    if (err && (err.type === "entity.too.large" || err.status === 413)) {
-      return res.status(413).json({
-        message: "This upload is too large for the server to accept. Try removing large files from the ZIP.",
-      });
-    }
-    next(err);
-  });
 
   // Basic security headers
   app.use((req, res, next) => {
@@ -108,28 +117,99 @@ export async function createApp() {
   });
 
   app.use(["/api/auth/url", "/auth/callback"], authLimiter);
-  app.use(["/api/me", "/api/repo-tree"], readLimiter);
+  app.use(["/api/me", "/api/bootstrap", "/api/repo-tree"], readLimiter);
   // "/api/repos" is dual-purpose (GET list / POST create), so it needs to pick
   // its limiter by method rather than being lumped into one blanket app.use.
   app.use("/api/repos", (req, res, next) => (req.method === "GET" ? readLimiter : writeLimiter)(req, res, next));
-  app.use(["/api/upload", "/api/delete-paths", "/api/repo"], writeLimiter);
+  // A push is one commit (which counts against writeLimiter, so the cap stays
+  // "30 pushes per 15 minutes") plus one /blobs request per batch of files,
+  // which is why /blobs gets its own, higher cap: a 50 MB ZIP is a few dozen
+  // batches, and counting them against writeLimiter would allow barely one push
+  // per window.
+  const blobLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 400,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: rateLimitHandler,
+  });
+  app.use("/api/upload/blobs", blobLimiter);
+  app.use(["/api/upload/commit", "/api/delete-paths", "/api/repo"], writeLimiter);
 
-  const setSessionCookie = (res: express.Response, token: string) => {
-    res.cookie(TOKEN_COOKIE, token, {
-      httpOnly: true,
-      secure: isProd,
-      sameSite: "lax",
-      signed: true,
-      path: "/",
-      maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
-    });
+  // --- Request body parsing --- //
+  // Parsing runs AFTER the rate limiters, and the default cap is small: every
+  // request that reaches this point may still be unauthenticated, and Node
+  // parses a JSON body synchronously on the single event loop, so a big body
+  // would stall every other request. Ordinary API calls (create repo, delete
+  // repo) carry well under 1 KB, so 100 KB is generous.
+  //
+  // The two routes that legitimately carry large bodies are skipped here and
+  // attach their own, larger parser AFTER requireAuth (see below), so an
+  // unauthenticated or rate-limited request never gets its body buffered.
+  const defaultJsonParser = express.json({ limit: "100kb" });
+  const ownsItsBodyParser = new Set(["/api/upload/blobs", "/api/upload/commit", "/api/delete-paths"]);
+  app.use((req, res, next) =>
+    ownsItsBodyParser.has(req.path) ? next() : defaultJsonParser(req, res, next)
+  );
+
+  // The client sends files to /api/upload/blobs in batches of a few MB, so a
+  // request normally stays small. The cap still has to fit the largest single
+  // file, which cannot be split: src/lib/uploadLimits.ts allows a total of
+  // MAX_TOTAL_UPLOAD_BYTES = 50MB of original bytes, and base64 (+~33%) plus
+  // JSON wrapper overhead need real headroom above that. For a gzipped request
+  // the limit applies to the DECOMPRESSED size, so a zip bomb cannot slip past it.
+  const blobsJsonParser = express.json({ limit: "75mb" });
+  // /api/upload/commit and /api/delete-paths send lists (paths, {path, sha}
+  // pairs, and the text of small files, which the client keeps under about
+  // 2 MB), but a large project can mean thousands of entries, which would not
+  // fit in 100 KB.
+  const pathListJsonParser = express.json({ limit: "5mb" });
+
+  const sessionCookieBase = {
+    secure: isProd,
+    sameSite: "lax" as const,
+    path: "/",
+    maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days; the flag always lives exactly as long as the session
   };
+  const setSessionFlag = (res: express.Response) => {
+    res.cookie(SESSION_FLAG_COOKIE, "1", { ...sessionCookieBase, httpOnly: false });
+  };
+  const clearSessionFlag = (res: express.Response) => {
+    res.clearCookie(SESSION_FLAG_COOKIE, { path: "/" });
+  };
+  const setSessionCookie = (res: express.Response, token: string) => {
+    res.cookie(TOKEN_COOKIE, token, { ...sessionCookieBase, httpOnly: true, signed: true });
+    setSessionFlag(res);
+  };
+
+  // Sessions created before the flag existed have gh_session but no has_session.
+  // Without this they would look signed out on the next visit. Any page request
+  // that carries a validly signed session cookie gets the flag; the Set-Cookie
+  // on the document response is applied before index.html's inline script runs,
+  // so that very load already sees it. A forged cookie fails signature
+  // verification, so signedCookies[TOKEN_COOKIE] is false and nothing is set.
+  app.use((req, res, next) => {
+    if (
+      (req.method === "GET" || req.method === "HEAD") &&
+      !req.path.startsWith("/api/") &&
+      !req.path.startsWith("/auth/") &&
+      !path.extname(req.path) &&
+      (req as any).signedCookies?.[TOKEN_COOKIE] &&
+      req.cookies?.[SESSION_FLAG_COOKIE] !== "1"
+    ) {
+      setSessionFlag(res);
+    }
+    next();
+  });
 
   // Auth middleware: reads the GitHub token from the signed, HttpOnly cookie.
   // The token is never sent to or readable by client-side JS.
   const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const token = (req as any).signedCookies?.[TOKEN_COOKIE];
     if (!token) {
+      // A leftover flag (session expired, secret rotated) would send the page
+      // into a spinner on every visit, so a 401 retires it.
+      if (req.cookies?.[SESSION_FLAG_COOKIE]) clearSessionFlag(res);
       return res.status(401).json({ message: "Not authenticated." });
     }
     (req as any).ghToken = token;
@@ -231,9 +311,16 @@ export async function createApp() {
   });
 
   app.post("/api/logout", (req, res) => {
+    const token = (req as any).signedCookies?.[TOKEN_COOKIE];
+    if (token) sessionData.invalidate(token);
     res.clearCookie(TOKEN_COOKIE, { path: "/" });
+    clearSessionFlag(res);
     res.json({ ok: true });
   });
+
+  // The user and the repository list, cached for a short time per session
+  // (see server/sessionData.ts).
+  const sessionData = createSessionData(githubService);
 
   // --- Authenticated GitHub proxy routes --- //
   // The client never holds the GitHub token; every GitHub API call is made
@@ -241,17 +328,31 @@ export async function createApp() {
 
   app.get("/api/me", requireAuth, async (req, res) => {
     try {
-      const user = await githubService.fetchUser((req as any).ghToken);
-      res.json(user);
+      res.json(await sessionData.getUser((req as any).ghToken));
     } catch (err: any) {
       handleGithubError(err, res);
     }
   });
 
+  // Everything the dashboard needs to appear, in ONE request: the user plus the
+  // first page of repositories, fetched from GitHub in parallel. The client
+  // loads any further pages afterwards with GET /api/repos?page=N.
+  app.get("/api/bootstrap", requireAuth, async (req, res) => {
+    try {
+      res.json(await sessionData.bootstrap((req as any).ghToken));
+    } catch (err: any) {
+      handleGithubError(err, res);
+    }
+  });
+
+  // One page (100) of repositories: { repos: [{id, name, full_name}], nextPage }.
   app.get("/api/repos", requireAuth, async (req, res) => {
     try {
-      const repos = await githubService.fetchRepositories((req as any).ghToken);
-      res.json(repos);
+      const page = Number(req.query.page ?? 1);
+      if (!Number.isInteger(page) || page < 1 || page > 1000) {
+        return res.status(400).json({ message: "page must be a whole number from 1 to 1000." });
+      }
+      res.json(await sessionData.getRepoPage((req as any).ghToken, page));
     } catch (err: any) {
       handleGithubError(err, res);
     }
@@ -262,7 +363,10 @@ export async function createApp() {
       const owner = req.query.owner as string;
       const repo = req.query.repo as string;
       if (!owner || !repo) return res.status(400).json({ message: "owner and repo are required." });
-      const result = await githubService.fetchRepoTree((req as any).ghToken, owner, repo);
+      // Optional: the default branch the client already has from the repo list.
+      // Only a hint; a missing or wrong one falls back to asking GitHub.
+      const branch = typeof req.query.branch === "string" && req.query.branch.length <= 255 ? req.query.branch : undefined;
+      const result = await githubService.fetchRepoTree((req as any).ghToken, owner, repo, branch || undefined);
       res.json(result);
     } catch (err: any) {
       handleGithubError(err, res);
@@ -276,7 +380,8 @@ export async function createApp() {
         return res.status(400).json({ message: "A repository name is required." });
       }
       const repo = await githubService.createRepository((req as any).ghToken, name, !!isPrivate);
-      res.status(201).json(repo);
+      sessionData.invalidate((req as any).ghToken); // the cached list no longer includes it
+      res.status(201).json(githubService.toRepoSummary(repo));
     } catch (err: any) {
       handleGithubError(err, res);
     }
@@ -287,6 +392,7 @@ export async function createApp() {
       const { owner, repo } = req.body || {};
       if (!owner || !repo) return res.status(400).json({ message: "owner and repo are required." });
       await githubService.deleteRepository((req as any).ghToken, owner, repo);
+      sessionData.invalidate((req as any).ghToken); // the cached list still includes it
       res.json({ ok: true });
     } catch (err: any) {
       handleGithubError(err, res);
@@ -301,39 +407,65 @@ export async function createApp() {
     typeof p !== "string" || p.length === 0 ||
     p.includes("../") || p.includes("..\\") || p.startsWith("/");
 
-  // Streams newline-delimited JSON progress events, ending with a final
-  // {"done": true, ...} line, so the client can keep its progress UI.
-  app.post("/api/upload", requireAuth, async (req, res) => {
-    const { owner, repo, files, commitMessage } = req.body || {};
-    if (!owner || !repo || !Array.isArray(files)) {
-      return res.status(400).json({ message: "owner, repo and files are required." });
-    }
-    if (files.some((f: any) => isUnsafePath(f?.path))) {
-      return res.status(400).json({ message: "One or more file paths are invalid." });
-    }
-    res.setHeader("Content-Type", "application/x-ndjson");
-    res.setHeader("Cache-Control", "no-cache");
+  // --- Batched upload (see githubService.ts for the overall flow) --- //
+  const isSha = (v: unknown): boolean => typeof v === "string" && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(v);
+
+  app.post("/api/upload/blobs", requireAuth, blobsJsonParser, async (req, res) => {
     try {
-      const commit = await githubService.uploadToGitHub(
-        (req as any).ghToken,
-        owner,
-        repo,
-        files,
-        commitMessage || "Upload files via ZiptoGit",
-        (status, current, total) => {
-          res.write(JSON.stringify({ status, current, total }) + "\n");
-        }
-      );
-      res.write(JSON.stringify({ done: true, commit }) + "\n");
+      const { owner, repo, files } = req.body || {};
+      if (!owner || !repo || !Array.isArray(files) || files.length === 0) {
+        return res.status(400).json({ message: "owner, repo and files are required." });
+      }
+      if (files.some((f: any) => isUnsafePath(f?.path))) {
+        return res.status(400).json({ message: "One or more file paths are invalid." });
+      }
+      if (files.some((f: any) => typeof f?.content !== "string")) {
+        return res.status(400).json({ message: "Every file needs base64 content." });
+      }
+      const blobs = await githubService.createBlobs((req as any).ghToken, owner, repo, files);
+      res.json({ blobs });
     } catch (err: any) {
-      const message = err?.response?.data?.message || err?.message || "Upload failed.";
-      res.write(JSON.stringify({ done: true, error: message }) + "\n");
-    } finally {
-      res.end();
+      handleGithubError(err, res);
     }
   });
 
-  app.post("/api/delete-paths", requireAuth, async (req, res) => {
+  // A tree entry is either a blob the client already created through /blobs
+  // ({path, sha}) or a small text file whose text GitHub turns into a blob while
+  // building the tree ({path, content}); never both, and never empty content
+  // (GitHub treats an empty string as "no content given").
+  const isValidTreeEntry = (e: any): boolean =>
+    !isUnsafePath(e?.path) &&
+    (isSha(e?.sha) !== (typeof e?.content === "string" && e.content.length > 0)) &&
+    (e?.sha === undefined || e?.content === undefined);
+
+  app.post("/api/upload/commit", requireAuth, pathListJsonParser, async (req, res) => {
+    try {
+      const { owner, repo, entries, commitMessage } = req.body || {};
+      if (!owner || !repo || !Array.isArray(entries) || entries.length === 0) {
+        return res.status(400).json({ message: "owner, repo and entries are required." });
+      }
+      if (entries.some((e: any) => isUnsafePath(e?.path))) {
+        return res.status(400).json({ message: "One or more file paths are invalid." });
+      }
+      if (!entries.every(isValidTreeEntry)) {
+        return res.status(400).json({
+          message: "Every entry needs either a valid blob SHA or non-empty text content.",
+        });
+      }
+      const commit = await githubService.commitUpload(
+        (req as any).ghToken,
+        owner,
+        repo,
+        entries,
+        typeof commitMessage === "string" && commitMessage ? commitMessage : "Upload files via ZiptoGit"
+      );
+      res.json({ commit });
+    } catch (err: any) {
+      handleGithubError(err, res);
+    }
+  });
+
+  app.post("/api/delete-paths", requireAuth, pathListJsonParser, async (req, res) => {
     const { owner, repo, paths, commitMessage } = req.body || {};
     if (!owner || !repo || !Array.isArray(paths) || paths.length === 0) {
       return res.status(400).json({ message: "owner, repo and paths are required." });
@@ -366,12 +498,36 @@ export async function createApp() {
   function handleGithubError(err: any, res: express.Response) {
     console.error(err);
     const status = err?.status && Number.isInteger(err.status) ? err.status : 500;
+    if (status === 401) {
+      // GitHub rejected the token (revoked or expired): the session is dead.
+      // Clearing both cookies stops the flag from being re-issued for it.
+      res.clearCookie(TOKEN_COOKIE, { path: "/" });
+      clearSessionFlag(res);
+    }
     const message = err?.response?.data?.message || err?.message || "GitHub API error.";
     res.status(status >= 400 && status < 600 ? status : 500).json({ message });
   }
 
+  // Turns Express's default opaque error page for an oversized request body
+  // into a clear JSON message the client already knows how to surface. This
+  // is registered after the routes on purpose: the large-body parsers are
+  // attached to individual routes, and an error handler only sees errors
+  // raised by middleware registered before it.
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err && (err.type === "entity.too.large" || err.status === 413)) {
+      const message = req.path === "/api/upload/blobs"
+        ? "This upload is too large for the server to accept. Try removing large files from the ZIP."
+        : "The request body is too large.";
+      return res.status(413).json({ message });
+    }
+    next(err);
+  });
+
   // Vite middleware for development (skipped in tests — API routes are all we need there)
   if (!isProd && !isTest) {
+    // Imported here, not at the top of the file, so a production process never
+    // loads Vite (or esbuild and the Tailwind native binaries behind it).
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -388,21 +544,69 @@ export async function createApp() {
     // until the user does a hard refresh. Setting "no-cache" (not "no-store")
     // still lets the browser use a conditional GET / 304, so this costs
     // basically nothing on repeat visits while guaranteeing freshness.
+    const cacheControlFor = (filePath: string): string =>
+      filePath.includes(`${path.sep}assets${path.sep}`) ||
+      // Self-hosted fonts keep their file names between builds, so the
+      // version is part of the name (inter-4.0-latin-400.woff2). Changing
+      // a font means adding a new file name, never editing one in place.
+      filePath.includes(`${path.sep}fonts${path.sep}`)
+        ? "public, max-age=31536000, immutable"
+        : "no-cache";
+
+    // `npm run build` also writes .br and .gz copies of the text files
+    // (scripts/precompress.mjs). Those are sent as they are, instead of being
+    // compressed again on every request. If dist/ has none (only `vite build`
+    // was run) the index is empty and everything below works as before.
+    const precompressed = scanPrecompressed(distPath);
+    const sendOptions = { root: distPath, cacheControl: cacheControlFor };
+    app.use(servePrecompressed(precompressed, sendOptions));
+
     app.use(
       express.static(distPath, {
         index: false,
+        // /faq is a directory (dist/faq/index.html). Without this, static
+        // answers /faq with a 301 to /faq/ instead of falling through to the
+        // page handler below.
+        redirect: false,
         setHeaders: (res, filePath) => {
-          if (filePath.includes(`${path.sep}assets${path.sep}`)) {
-            res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-          } else {
-            res.setHeader("Cache-Control", "no-cache");
-          }
+          res.setHeader("Cache-Control", cacheControlFor(filePath));
         },
       })
     );
+
+    // `npm run build` prerenders the home page and the content pages into
+    // static HTML (scripts/prerender.mjs): dist/index.html for "/" and
+    // dist/<slug>/index.html for the rest, so the first paint needs no JS.
+    // Anything else (an unknown URL) gets dist/200.html, the same page with an
+    // EMPTY #root, which the client renders from scratch. That split matters:
+    // serving a prerendered page for a different URL would not match what
+    // React renders and would throw away the server HTML on hydration.
+    // If only `vite build` was run, dist/index.html is itself the empty shell.
+    const prerenderedPages = new Map<string, string | null>();
+    const prerenderedPageFor = (urlPath: string): string | null => {
+      const slug = urlPath.replace(/^\/+|\/+$/g, "");
+      if (slug !== "" && !/^[a-z0-9-]+$/.test(slug)) return null; // never build a path from anything else
+      if (!prerenderedPages.has(slug)) {
+        const file = slug === "" ? path.join(distPath, "index.html") : path.join(distPath, slug, "index.html");
+        prerenderedPages.set(slug, fs.existsSync(file) ? file : null);
+      }
+      return prerenderedPages.get(slug)!;
+    };
+    const shellFile = fs.existsSync(path.join(distPath, "200.html"))
+      ? path.join(distPath, "200.html")
+      : path.join(distPath, "index.html");
+
     app.get("*", (req, res) => {
       res.setHeader("Cache-Control", "no-cache");
-      res.sendFile(path.join(distPath, "index.html"));
+      // Everything above that exists on disk was already sent by express.static.
+      // A path with a file extension that got this far does not exist, so it is a
+      // 404, not the app page (see server/spaFallback.ts).
+      if (hasFileExtension(req.path)) return res.status(404).type("text/plain").send("Not found");
+      const page = prerenderedPageFor(req.path) ?? shellFile;
+      const copies = precompressed.byFile.get(page);
+      // If the compressed copy cannot be read, send the plain page instead.
+      if (copies && sendPrecompressed(req, res, copies, sendOptions, () => res.sendFile(page))) return;
+      res.sendFile(page);
     });
   }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildTree, isPathCovered, toggleSelection } from "./fileTree";
+import { buildTree, flattenTree, isPathCovered, toggleSelection, visibleRange } from "./fileTree";
 import type { RepoTreeEntry } from "./github";
 
 const entries: RepoTreeEntry[] = [
@@ -100,5 +100,91 @@ describe("toggleSelection", () => {
       expect(isPathCovered(e.path, selected)).toBe(true);
     }
     expect(isPathCovered("public/logo.png", selected)).toBe(false);
+  });
+});
+
+describe("buildTree ordering", () => {
+  it("puts folders before files and sorts each folder by name, once, at build time", () => {
+    const tree = buildTree([
+      { path: "zeta.txt", type: "blob", sha: "1" },
+      { path: "beta", type: "tree", sha: "2" },
+      { path: "Alpha.txt", type: "blob", sha: "3" },
+      { path: "alpha", type: "tree", sha: "4" },
+      { path: "beta/z.ts", type: "blob", sha: "5" },
+      { path: "beta/a.ts", type: "blob", sha: "6" },
+      { path: "beta/lib", type: "tree", sha: "7" },
+    ]);
+    expect(tree.map((n) => n.name)).toEqual(["alpha", "beta", "Alpha.txt", "zeta.txt"]);
+    expect(tree[1].children.map((n) => n.name)).toEqual(["lib", "a.ts", "z.ts"]);
+  });
+
+  it("puts an entry whose parent is missing at the top level", () => {
+    const tree = buildTree([{ path: "ghost/file.txt", type: "blob", sha: "1" }]);
+    expect(tree.map((n) => n.path)).toEqual(["ghost/file.txt"]);
+  });
+
+  it("builds a 20,000-entry tree quickly", () => {
+    const big: RepoTreeEntry[] = [];
+    for (let d = 0; d < 200; d++) {
+      big.push({ path: `dir${d}`, type: "tree", sha: `d${d}` });
+      for (let f = 0; f < 100; f++) big.push({ path: `dir${d}/file${f}.ts`, type: "blob", sha: `f${d}-${f}` });
+    }
+    const t0 = performance.now();
+    const tree = buildTree(big);
+    const ms = performance.now() - t0;
+    expect(tree).toHaveLength(200);
+    expect(tree[0].children).toHaveLength(100);
+    expect(ms).toBeLessThan(1000);
+  });
+});
+
+describe("flattenTree", () => {
+  const tree = buildTree(entries);
+
+  it("lists every node in display order with its depth", () => {
+    expect(flattenTree(tree, new Set()).map((r) => `${r.depth}:${r.node.path}`)).toEqual([
+      "0:public",
+      "1:public/logo.png",
+      "0:src",
+      "1:src/lib",
+      "2:src/lib/github.ts",
+      "1:src/App.tsx",
+      "0:README.md",
+    ]);
+  });
+
+  it("leaves out the contents of collapsed folders, but not the folder itself", () => {
+    const rows = flattenTree(tree, new Set(["src"]));
+    expect(rows.map((r) => r.node.path)).toEqual(["public", "public/logo.png", "src", "README.md"]);
+  });
+
+  it("only a collapsed folder hides its own contents", () => {
+    const rows = flattenTree(tree, new Set(["src/lib"]));
+    expect(rows.map((r) => r.node.path)).toContain("src/lib");
+    expect(rows.map((r) => r.node.path)).not.toContain("src/lib/github.ts");
+    expect(rows.map((r) => r.node.path)).toContain("src/App.tsx");
+  });
+});
+
+describe("visibleRange", () => {
+  it("renders the rows in view plus overscan on each side", () => {
+    // 384px / 32px = 12 rows in view (+1 for a partly visible row), 8 overscan.
+    expect(visibleRange(100, 384, 32, 5000, 8)).toEqual({ start: 92, end: 100 + 13 + 8 });
+  });
+
+  it("clamps at the top and bottom of the list", () => {
+    expect(visibleRange(0, 384, 32, 5000, 8)).toEqual({ start: 0, end: 21 });
+    expect(visibleRange(4995, 384, 32, 5000, 8)).toEqual({ start: 4987, end: 5000 });
+  });
+
+  it("shows everything for a short list", () => {
+    expect(visibleRange(0, 384, 32, 5, 8)).toEqual({ start: 0, end: 5 });
+    expect(visibleRange(0, 384, 32, 0, 8)).toEqual({ start: 0, end: 0 });
+  });
+
+  it("copes with a scroll position past the end (the list just got shorter)", () => {
+    const { start, end } = visibleRange(900, 384, 32, 10, 8);
+    expect(end).toBe(10);
+    expect(start).toBeLessThanOrEqual(10);
   });
 });

@@ -4,7 +4,7 @@ const { mockCreateForAuthenticatedUser } = vi.hoisted(() => ({
   mockCreateForAuthenticatedUser: vi.fn(),
 }));
 
-vi.mock("octokit", () => ({
+vi.mock("./octokit", () => ({
   Octokit: vi.fn().mockImplementation(function (this: any) {
     this.rest = {
       repos: {

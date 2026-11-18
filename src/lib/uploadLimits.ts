@@ -1,9 +1,13 @@
 import type { ExtractedFile } from "./github";
 
-// These two must stay in sync with the server's express.json() body limit
-// (server.ts). Base64 encoding adds ~33% overhead, and the JSON wrapper
-// (keys, quotes, commas) adds a bit more, so the server's raw byte limit
-// needs meaningful headroom above MAX_TOTAL_UPLOAD_BYTES.
+// These two must stay in sync with the body limit server.ts puts on the
+// /api/upload/blobs route only (blobsJsonParser); every other route is capped
+// at 100 KB, or 5 MB for the long path lists. The client sends files in batches
+// of a few MB (see planUploadBatches in github.ts), but a file cannot be split,
+// so a single request can still be as large as the biggest file. Base64 adds
+// ~33% overhead and the JSON wrapper (keys, quotes, commas) adds a bit more, so
+// the server's raw byte limit needs meaningful headroom above
+// MAX_TOTAL_UPLOAD_BYTES.
 //   MAX_TOTAL_UPLOAD_BYTES = 50MB of original file bytes
 //   -> ~66MB base64 -> server limit is set to 75mb for safety margin.
 export const MAX_TOTAL_UPLOAD_BYTES = 50 * 1024 * 1024; // 50MB

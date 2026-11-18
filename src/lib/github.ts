@@ -1,5 +1,6 @@
-import JSZip from "jszip";
 import { estimateBytesFromBase64, MAX_TOTAL_UPLOAD_BYTES, MAX_SINGLE_FILE_BYTES } from "./uploadLimits";
+import { extractZipEntries } from "./zipExtract";
+import { prewarmWorker, runWorkerJob, takeWorker, workersSupported, WorkerUnavailableError } from "./workerJob";
 
 export interface ExtractedFile {
   path: string;
@@ -19,7 +20,58 @@ const formatMB = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 // can hang or crash the tab well before we get to inspect individual files.
 const MAX_RAW_ZIP_BYTES = 200 * 1024 * 1024; // 200MB
 
-// ZIP extraction happens entirely client-side and needs no GitHub token.
+// Nothing needs JSZip until a ZIP is picked, so it is a separate chunk loaded
+// on first use instead of part of the first download. (Only the fallback below
+// loads it on the main thread; the worker bundles its own copy.)
+const loadJSZip = () => import("jszip").then((m) => m.default);
+
+const createExtractWorker = () =>
+  new Worker(new URL("./workers/extract.worker.ts", import.meta.url), { type: "module" });
+
+/**
+ * Gets ZIP extraction ready in the background so the first extractZip does not
+ * wait for a download: starts the worker where Workers exist, otherwise
+ * fetches the JSZip chunk for the main-thread fallback.
+ */
+export const warmZipExtractor = (): void => {
+  if (workersSupported()) prewarmWorker("extract", createExtractWorker);
+  else loadJSZip().catch(() => {});
+};
+
+const extractZipInWorker = async (
+  file: File,
+  onProgress?: (filename: string) => void
+): Promise<ExtractedFile[]> => {
+  const result: ExtractedFile[] = [];
+  await runWorkerJob<null>(takeWorker("extract", createExtractWorker), { file }, (m) => {
+    if (m.type === "file") {
+      result.push({ path: m.path, content: m.content });
+      onProgress?.(m.path);
+    }
+  });
+  return result;
+};
+
+const extractZipOnMainThread = async (
+  file: File,
+  onProgress?: (filename: string) => void
+): Promise<ExtractedFile[]> => {
+  const result: ExtractedFile[] = [];
+  const JSZipClass = await loadJSZip();
+  await extractZipEntries(JSZipClass, file, {
+    onFile: (path, content) => {
+      result.push({ path, content });
+      onProgress?.(path);
+    },
+    yieldBetweenBatches: true,
+  });
+  return result;
+};
+
+// ZIP extraction happens entirely client-side and needs no GitHub token. The
+// heavy part (parsing the archive, base64-encoding every entry) runs in a Web
+// Worker so the page stays responsive; if the browser cannot start one, the
+// same code runs on the main thread instead.
 export const extractZip = async (
   file: File,
   onProgress?: (filename: string) => void
@@ -30,74 +82,16 @@ export const extractZip = async (
     );
   }
 
-  const result: ExtractedFile[] = [];
-  const zip = await JSZip.loadAsync(file);
-
-  const entries: { path: string; entry: JSZip.JSZipObject }[] = [];
-  zip.forEach((relativePath, zipEntry) => {
-    if (!zipEntry.dir && !relativePath.includes("__MACOSX") && !relativePath.startsWith(".DS_Store")) {
-      if (relativePath.includes("../") || relativePath.includes("..\\") || relativePath.startsWith("/")) {
-        return;
-      }
-      entries.push({ path: relativePath, entry: zipEntry });
-    }
-  });
-
-  // Many ZIP exports wrap every file in one top-level folder (e.g. GitHub's
-  // "Download ZIP", `zip -r project.zip myfolder/`) instead of zipping file
-  // contents directly. If every entry shares the same first path segment,
-  // strip it so files land at the repo root instead of one level deep.
-  if (entries.length > 0) {
-    const firstSegment = (p: string) => p.split("/")[0];
-    const rootFolder = firstSegment(entries[0].path);
-    const allShareRoot =
-      rootFolder !== "" &&
-      entries.every((e) => e.path.includes("/") && firstSegment(e.path) === rootFolder);
-    if (allShareRoot) {
-      for (const e of entries) {
-        e.path = e.path.slice(rootFolder.length + 1); // +1 to drop the "/"
-      }
+  if (workersSupported()) {
+    try {
+      return await extractZipInWorker(file, onProgress);
+    } catch (err) {
+      // Only "the worker never started" falls back. A real error (a bad ZIP, a
+      // size limit) would just happen again, and is reported as it is.
+      if (!(err instanceof WorkerUnavailableError)) throw err;
     }
   }
-
-  let totalBytes = 0;
-  const MAX_CONCURRENT_EXTRACT = 6;
-  for (let i = 0; i < entries.length; i += MAX_CONCURRENT_EXTRACT) {
-    const batch = entries.slice(i, i + MAX_CONCURRENT_EXTRACT);
-    const batchResults = await Promise.all(
-      batch.map(async (item) => ({ item, base64Content: await item.entry.async("base64") }))
-    );
-
-    // Applied in original order (not completion order) so size-limit errors
-    // are always reported deterministically, and so onProgress still reads
-    // like a top-to-bottom walk of the archive.
-    for (const { item, base64Content } of batchResults) {
-      if (onProgress) onProgress(item.path);
-
-      // Fail fast instead of extracting the entire (possibly huge) ZIP into
-      // memory first — a very large archive can otherwise hang or crash the tab.
-      const fileBytes = estimateBytesFromBase64(base64Content);
-      if (fileBytes > MAX_SINGLE_FILE_BYTES) {
-        throw new Error(
-          `"${item.path}" is ${formatMB(fileBytes)}, which is over GitHub's ${formatMB(MAX_SINGLE_FILE_BYTES)} per-file limit. Remove it from the ZIP and try again.`
-        );
-      }
-      totalBytes += fileBytes;
-      if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
-        throw new Error(
-          `This ZIP is larger than the ${formatMB(MAX_TOTAL_UPLOAD_BYTES)} total upload limit. Try splitting it into smaller pushes or removing large/unnecessary files (e.g. node_modules, build output).`
-        );
-      }
-
-      result.push({ path: item.path, content: base64Content });
-    }
-
-    // Yield to the event loop between batches (rather than every 10 files)
-    // so the progress UI keeps painting without giving up the concurrency win.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-
-  return result;
+  return extractZipOnMainThread(file, onProgress);
 };
 
 // Folders selected via <input webkitdirectory> or dragged onto the dropzone
@@ -325,13 +319,62 @@ async function readNdjsonStream<T>(
   return result as T;
 }
 
-export const fetchUser = async () => {
-  const res = await apiFetch("/api/me");
+// What GET /api/bootstrap returns: the user plus the FIRST page of repositories.
+export interface BootstrapData {
+  user: { login: string; avatar_url: string };
+  repos: RepoSummary[];
+  /** Next page to request with fetchRepositories(), or null when there is none. */
+  nextPage: number | null;
+}
+export interface RepoSummary {
+  id: number;
+  name: string;
+  full_name: string;
+  default_branch?: string;
+}
+
+// index.html starts GET /api/bootstrap from an inline script (only on "/" and
+// only when the has_session flag is set), in parallel with the JS download,
+// and leaves the outcome on window.__ZTG_BOOT__. The first fetchBootstrap()
+// call takes it, so the request is not made twice. Later calls (after the
+// OAuth popup, say) always make a fresh request.
+type EarlyBootstrap = { ok: boolean; status: number; body: any };
+declare global {
+  interface Window {
+    __ZTG_BOOT__?: Promise<EarlyBootstrap>;
+  }
+}
+
+const takeEarlyBootstrap = (): Promise<EarlyBootstrap> | undefined => {
+  if (typeof window === "undefined") return undefined;
+  const early = window.__ZTG_BOOT__;
+  delete window.__ZTG_BOOT__;
+  return early;
+};
+
+export const fetchBootstrap = async (): Promise<BootstrapData> => {
+  const early = takeEarlyBootstrap();
+  if (early) {
+    let result: EarlyBootstrap | undefined;
+    try {
+      result = await early;
+    } catch {
+      // The early request never got an answer (network error). Fall through
+      // to a normal request, which reports the failure the usual way.
+    }
+    if (result) {
+      if (result.ok) return result.body;
+      // Same shape apiFetch() throws, so callers cannot tell the two apart.
+      throw new ApiError(result.body?.message || `Request failed (${result.status})`, result.status);
+    }
+  }
+  const res = await apiFetch("/api/bootstrap");
   return res.json();
 };
 
-export const fetchRepositories = async () => {
-  const res = await apiFetch("/api/repos");
+// One further page of the repository list (page 1 comes with fetchBootstrap).
+export const fetchRepositories = async (page: number): Promise<{ repos: RepoSummary[]; nextPage: number | null }> => {
+  const res = await apiFetch(`/api/repos?page=${page}`);
   return res.json();
 };
 
@@ -344,11 +387,18 @@ export const createRepository = async (name: string, isPrivate: boolean) => {
   return res.json();
 };
 
+// `branch` is the repository's default branch from the repo list. It lets the
+// server list the files in one GitHub request instead of three. `truncated` is
+// true when GitHub cut the list off (very large repositories): the tree is then
+// only part of the repository.
 export const fetchRepoTree = async (
   owner: string,
-  repo: string
-): Promise<{ tree: RepoTreeEntry[]; defaultBranch: string }> => {
-  const res = await apiFetch(`/api/repo-tree?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`);
+  repo: string,
+  branch?: string
+): Promise<{ tree: RepoTreeEntry[]; defaultBranch: string; truncated: boolean }> => {
+  const params = new URLSearchParams({ owner, repo });
+  if (branch) params.set("branch", branch);
+  const res = await apiFetch(`/api/repo-tree?${params}`);
   return res.json();
 };
 
@@ -364,6 +414,141 @@ export const logout = async (): Promise<void> => {
   await apiFetch("/api/logout", { method: "POST" });
 };
 
+// --- Batched upload --- //
+// A push is sent as several small requests instead of one request holding the
+// whole ZIP as base64 JSON:
+//   /api/upload/blobs   once per batch of files: GitHub stores the contents, we get SHAs back
+//   /api/upload/commit  once: one tree + one commit from the list of entries
+// This keeps the transient JSON.stringify copy to one batch at a time instead of
+// the whole upload, and gives the progress bar a real step after every batch.
+// Nothing has to happen before the first batch: the server only looks at the
+// repository (and initializes it, if it is empty) when GitHub says it must.
+
+// Roughly how much base64 goes into one /blobs request. A file bigger than this
+// is sent on its own (it cannot be split), so one request can be as large as
+// the biggest single file, which the server's /blobs limit allows for.
+const MAX_BATCH_BASE64_CHARS = 4 * 1024 * 1024;
+// Caps how many files share a request, so a folder of thousands of tiny files
+// does not become one long-running request.
+const MAX_BATCH_FILES = 100;
+
+/** Splits files, in order, into batches of at most `maxChars` base64 characters and `maxFiles` files. */
+export const planUploadBatches = <T extends { path: string; content: string }>(
+  files: T[],
+  maxChars = MAX_BATCH_BASE64_CHARS,
+  maxFiles = MAX_BATCH_FILES
+): T[][] => {
+  const batches: T[][] = [];
+  let current: T[] = [];
+  let currentChars = 0;
+  for (const file of files) {
+    const size = file.content.length + file.path.length;
+    if (current.length > 0 && (current.length >= maxFiles || currentChars + size > maxChars)) {
+      batches.push(current);
+      current = [];
+      currentChars = 0;
+    }
+    current.push(file);
+    currentChars += size;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+};
+
+// Small text files do not need a blob request of their own: their text goes
+// along with the commit and GitHub creates the blob while it builds the tree.
+// That is one API call fewer per file (and those calls are what GitHub throttles).
+// Both caps keep the commit request small; it is limited to 5 MB on the server,
+// and GitHub's own limit on a tree request is 7 MB.
+const MAX_INLINE_FILE_BYTES = 32 * 1024;
+const MAX_INLINE_TOTAL_BYTES = 2 * 1024 * 1024;
+
+// Returns the file's text when it is a non-empty, valid UTF-8, NUL-free file
+// small enough to inline, otherwise null (it is then sent as a blob, byte for
+// byte). Empty files stay blobs because GitHub reads empty `content` as "no
+// content given". `ignoreBOM: true` keeps a leading byte-order mark in the text
+// instead of silently dropping it.
+const inlineTextOf = (base64: string): string | null => {
+  if (base64.length === 0 || estimateBytesFromBase64(base64) > MAX_INLINE_FILE_BYTES) return null;
+  try {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      const byte = binary.charCodeAt(i);
+      if (byte === 0) return null; // NUL: treat as binary
+      bytes[i] = byte;
+    }
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return null; // not valid UTF-8 (or not valid base64)
+  }
+};
+
+/** Splits files into small text files to send with the commit and everything else, which goes up as blobs. */
+export const splitInlineText = (
+  files: ExtractedFile[]
+): { inline: { path: string; content: string }[]; blobFiles: ExtractedFile[] } => {
+  const inline: { path: string; content: string }[] = [];
+  const blobFiles: ExtractedFile[] = [];
+  let inlineBytes = 0;
+  for (const file of files) {
+    const text = inlineTextOf(file.content);
+    const bytes = text === null ? 0 : estimateBytesFromBase64(file.content);
+    if (text !== null && inlineBytes + bytes <= MAX_INLINE_TOTAL_BYTES) {
+      inline.push({ path: file.path, content: text });
+      inlineBytes += bytes;
+    } else {
+      blobFiles.push(file);
+    }
+  }
+  return { inline, blobFiles };
+};
+
+// base64 is 6 bits of information per 8-bit character, so gzip wins back
+// nearly all of its 33% overhead even for files that are already compressed.
+// CompressionStream is in current Chrome, Edge, Safari and Firefox; where it is
+// missing, or fails, the body goes out uncompressed.
+const gzipJson = async (json: string): Promise<Blob | null> => {
+  try {
+    if (typeof CompressionStream === "undefined" || typeof Blob === "undefined") return null;
+    const stream = new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"));
+    return await new Response(stream).blob();
+  } catch {
+    return null;
+  }
+};
+
+// Network drops and gateway errors are worth another try for the requests that
+// are safe to repeat: blobs are content-addressed, so sending a batch again
+// changes nothing. The commit request is NOT retried, because a commit that did
+// go through but whose answer was lost would be repeated as a second, empty commit.
+const isTransientFailure = (err: unknown): boolean =>
+  err instanceof ApiError ? [502, 503, 504].includes(err.status) : err instanceof TypeError;
+
+async function postJson<T>(path: string, body: unknown, { gzip = false, retry = false } = {}): Promise<T> {
+  const json = JSON.stringify(body);
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  let payload: BodyInit = json;
+  if (gzip) {
+    const compressed = await gzipJson(json);
+    if (compressed) {
+      payload = compressed;
+      headers["Content-Encoding"] = "gzip";
+    }
+  }
+
+  const MAX_ATTEMPTS = retry ? 3 : 1;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const res = await apiFetch(path, { method: "POST", headers, body: payload });
+      return (await res.json()) as T;
+    } catch (err) {
+      if (attempt >= MAX_ATTEMPTS || !isTransientFailure(err)) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+    }
+  }
+}
+
 export const uploadToGitHub = async (
   owner: string,
   repo: string,
@@ -371,15 +556,37 @@ export const uploadToGitHub = async (
   commitMessage: string,
   onProgress: (status: string, current: number, total: number) => void
 ) => {
-  const res = await apiFetch("/api/upload", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ owner, repo, files, commitMessage }),
-  });
-  const result = await readNdjsonStream<{ commit: any }>(res, (status, current, total) =>
-    onProgress(status, current ?? 0, total ?? 0)
+  const { inline, blobFiles } = splitInlineText(files);
+
+  // Steps: one per file that goes up as a blob, then the commit and its finish.
+  const total = blobFiles.length + 2;
+  const entries: ({ path: string; sha: string } | { path: string; content: string })[] = [...inline];
+
+  const uploadingMessage = (done: number) => `Uploading files (${done}/${blobFiles.length})...`;
+  let uploaded = 0;
+  if (blobFiles.length > 0) onProgress(uploadingMessage(0), 0, total);
+  for (const batch of planUploadBatches(blobFiles)) {
+    const result = await postJson<{ blobs: { path: string; sha: string }[] }>(
+      "/api/upload/blobs",
+      { owner, repo, files: batch },
+      { gzip: true, retry: true }
+    );
+    if (!Array.isArray(result.blobs) || result.blobs.length !== batch.length) {
+      throw new Error("The server did not confirm every file in this upload. Please try again.");
+    }
+    entries.push(...result.blobs);
+    uploaded += batch.length;
+    onProgress(uploadingMessage(uploaded), uploaded, total);
+  }
+
+  onProgress("Committing changes...", blobFiles.length + 1, total);
+  const { commit } = await postJson<{ commit: any }>(
+    "/api/upload/commit",
+    { owner, repo, entries, commitMessage },
+    { gzip: true }
   );
-  return result.commit;
+  onProgress("Finalizing...", total, total);
+  return commit;
 };
 
 export const deleteRepoPaths = async (
