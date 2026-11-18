@@ -4,7 +4,7 @@ import type { BootstrapData } from "./lib/github";
 import { trackEvent, trackPageView } from "./lib/analytics";
 import { prefetchAuthUrl, takeAuthUrl } from "./lib/authUrl";
 import { readSessionFlag, clearSessionFlag, sessionPending, endSessionPending } from "./lib/session";
-import { findPublicPage, NOT_FOUND_PAGE, PAGE_TITLES, SITE_ORIGIN } from "./routes";
+import { findPublicPage, NOT_FOUND_PAGE, SITE_ORIGIN } from "./routes";
 import { SECRET_SCAN_NOTE } from "./lib/uploadLimits";
 import { Github, Loader2, CheckCircle, ShieldCheck, Sun, Moon, Menu, X } from "lucide-react";
 import { Alert, CARD_EDGE, CTRL, StepBadge, T, useMediaQuery } from "./components/ui";
@@ -229,7 +229,7 @@ function RouteEffects() {
     for (const [selector, content] of Object.entries(tags)) {
       document.querySelector(selector)?.setAttribute("content", content);
     }
-    trackPageView(page.path === "/" ? "Home" : PAGE_TITLES[page.path as keyof typeof PAGE_TITLES] ?? "Page not found");
+    trackPageView();
   }, [pathname]);
 
   useLayoutEffect(() => {
@@ -539,7 +539,7 @@ function ZipUploader() {
 
     window.addEventListener("message", handleMessage);
     return () => {
-      accountRequestId.current++;
+      accountRequestId.current += 1;
       window.removeEventListener("message", handleMessage);
     };
   }, [loadAccount]);
