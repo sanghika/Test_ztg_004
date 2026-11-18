@@ -246,5 +246,75 @@ class DashboardRaces(unittest.TestCase):
         expect(page.get_by_role("button", name="Choose ZIP file")).to_be_visible()
 
 
+    def test_retry_bootstrap_recovers_existing_account(self):
+        page = self.page
+        failures = []
+
+        def temporarily_unavailable(route):
+            failures.append(route.request.url)
+            route.fulfill(status=503, json={"message": "Try again"})
+            page.unroute("**/api/bootstrap", temporarily_unavailable)
+
+        page.route("**/api/bootstrap", temporarily_unavailable)
+        page.goto(ORIGIN)
+        expect(page.get_by_role("heading", name="Couldn’t load your GitHub account")).to_be_visible()
+        expect(page.get_by_role("button", name="Connect GitHub")).to_have_count(0)
+        page.get_by_role("button", name="Retry loading account").click()
+        expect(page.get_by_role("combobox", name="Repository")).to_have_value("demo/first")
+        self.assertEqual(1, len(failures))
+
+    def test_repository_picker_is_locked_until_creation_finishes(self):
+        page = self.page
+        pending = []
+        page.route("**/api/repos", lambda route: pending.append(route))
+        page.goto(ORIGIN)
+        picker = page.get_by_role("combobox", name="Repository")
+        picker.select_option("__create_new_repo__")
+        page.get_by_role("textbox", name="New repository name").fill("new-repo")
+        with page.expect_request("**/api/repos"):
+            page.get_by_role("button", name="Create repository", exact=True).click()
+        expect(picker).to_be_disabled()
+        pending[0].fulfill(json={
+            "id": 3, "name": "new-repo", "full_name": "demo/new-repo", "default_branch": "main"
+        })
+        expect(picker).to_have_value("demo/new-repo")
+        expect(picker).to_be_enabled()
+        picker.select_option("demo/second")
+        expect(picker).to_have_value("demo/second")
+
+    def test_dropped_folder_read_errors_leave_the_picker_usable(self):
+        page = self.page
+        page.goto(ORIGIN)
+        drop_zone = page.get_by_role("button", name="Choose ZIP file").locator("..")
+        for failed_entry in ["folder", "file"]:
+            with self.subTest(failed_entry=failed_entry):
+                drop_zone.evaluate("""(zone, failedEntry) => {
+                    const nestedFile = {
+                        name: "example.txt", isFile: true,
+                        file: (_, onError) => onError(new DOMException("Unavailable", "NotReadableError")),
+                    };
+                    DataTransferItem.prototype.webkitGetAsEntry = () => {
+                        let read = false;
+                        return {
+                            name: "project", isDirectory: true,
+                            createReader: () => ({
+                                readEntries: (onSuccess, onError) => {
+                                    if (failedEntry === "folder") return onError(new DOMException("Unavailable"));
+                                    onSuccess(read ? [] : [nestedFile]);
+                                    read = true;
+                                },
+                            }),
+                        };
+                    };
+                    const dataTransfer = new DataTransfer();
+                    dataTransfer.items.add(new File(["placeholder"], "example.txt"));
+                    zone.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer }));
+                }""", failed_entry)
+                message = 'Could not read folder "project".' if failed_entry == "folder" else 'Could not read "project/example.txt".'
+                expect(page.get_by_role("alert")).to_have_text(message)
+                expect(page.get_by_role("button", name="Choose ZIP file")).to_be_enabled()
+                expect(page.get_by_text("Reading folder…")).to_have_count(0)
+
+
 if __name__ == "__main__":
     unittest.main()

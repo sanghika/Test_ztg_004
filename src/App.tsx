@@ -494,38 +494,37 @@ function ZipUploader() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   // Start with the signed-out card so hydration matches the prerendered HTML.
   const [isCheckingAuth, setIsCheckingAuth] = useState(false);
+  const [accountLoadFailed, setAccountLoadFailed] = useState(false);
   const checkAtMount = useRef<boolean | null>(null);
+  const accountRequestId = useRef(0);
+
+  const loadAccount = useCallback(async () => {
+    const id = ++accountRequestId.current;
+    setAccount(null);
+    setIsCheckingAuth(true);
+    setErrorMsg(null);
+    setAccountLoadFailed(false);
+    // Switch from the head script's pending state to React's loading state.
+    endSessionPending();
+
+    try {
+      const { default: Dashboard, fetchBootstrap } = await import("./Dashboard");
+      if (id !== accountRequestId.current) return;
+      const data = await fetchBootstrap();
+      if (id === accountRequestId.current) setAccount({ Dashboard, data });
+    } catch (err) {
+      if (id !== accountRequestId.current) return;
+      if ((err as { status?: number })?.status === 401) {
+        clearSessionFlag();
+      } else {
+        setAccountLoadFailed(true);
+      }
+    } finally {
+      if (id === accountRequestId.current) setIsCheckingAuth(false);
+    }
+  }, []);
 
   useLayoutEffect(() => {
-    let requestId = 0;
-
-    const loadAccount = async () => {
-      const id = ++requestId;
-      setAccount(null);
-      setIsCheckingAuth(true);
-      setErrorMsg(null);
-      // The head script hides the hero while bootstrap is in flight. Switch
-      // that CSS loading state to React's spinner before the next paint.
-      endSessionPending();
-
-      try {
-        const { default: Dashboard, fetchBootstrap } = await import("./Dashboard");
-        if (id !== requestId) return;
-        const data = await fetchBootstrap();
-        if (id === requestId) setAccount({ Dashboard, data });
-      } catch (err) {
-        if (id !== requestId) return;
-        if ((err as { status?: number })?.status === 401) {
-          clearSessionFlag();
-        } else {
-          console.error(err);
-          setErrorMsg("Failed to load GitHub user data.");
-        }
-      } finally {
-        if (id === requestId) setIsCheckingAuth(false);
-      }
-    };
-
     // Preserve the head script's verdict if a fast 401 already cleared the
     // cookie, including when Strict Mode runs this effect twice.
     checkAtMount.current ??= sessionPending() || readSessionFlag();
@@ -540,10 +539,10 @@ function ZipUploader() {
 
     window.addEventListener("message", handleMessage);
     return () => {
-      requestId++;
+      accountRequestId.current++;
       window.removeEventListener("message", handleMessage);
     };
-  }, []);
+  }, [loadAccount]);
 
   const handleConnect = useCallback(async () => {
     // Open the popup synchronously, on the click itself — some browsers
@@ -551,7 +550,7 @@ function ZipUploader() {
     // happens with no `await` in between, or it gets silently blocked with
     // no error. We open a blank popup now and point it at the real URL once
     // we have it, instead of awaiting the fetch first and opening after.
-    const authWindow = window.open("", "oauth_popup", "width=600,height=700");
+    const authWindow = window.open("", "_blank", "width=600,height=700");
     if (!authWindow) {
       setErrorMsg("Please allow popups to connect your GitHub account.");
       return;
@@ -618,6 +617,14 @@ function ZipUploader() {
         <div className="flex-1 flex items-center justify-center py-14 lg:py-0" role="status">
           <Loader2 className="w-6 h-6 text-muted animate-spin" />
           <span className="sr-only">Loading…</span>
+        </div>
+      ) : accountLoadFailed ? (
+        <div className="flex-1 self-center p-6 lg:p-12">
+          <h1 className={`${T.h1} text-ink dark:text-white mb-3`}>Couldn’t load your GitHub account</h1>
+          <p role="status" className="text-muted mb-6">Try loading your account again to reopen the dashboard.</p>
+          <button type="button" onClick={loadAccount} className={`${CTRL} px-5 bg-primary text-on-primary hover:bg-primary-hover`}>
+            Retry loading account
+          </button>
         </div>
       ) : (
         <div data-signed-out className="flex-1 grid lg:grid-cols-2">

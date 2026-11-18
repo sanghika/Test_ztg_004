@@ -13,7 +13,8 @@ import { hasFileExtension } from "./server/spaFallback";
 import { findPublicPage, NOT_FOUND_PAGE, PRERENDER_ROUTES } from "./src/routes";
 
 const TOKEN_COOKIE = "gh_session";
-const OAUTH_STATE_COOKIE = "oauth_state";
+const oauthStateCookie = (state: string) => `oauth_state_${state}`;
+const OAUTH_CALLBACK_PATH = "/auth/callback";
 // A readable (NOT HttpOnly) companion to the session cookie. It holds only "1"
 // and is never trusted for anything: it lets index.html and the client decide
 // between the hero and a spinner before the first API call has answered. The real session
@@ -220,7 +221,7 @@ export async function createApp() {
   // --- OAuth --- //
 
   app.get("/api/auth/url", (req, res) => {
-    const redirectUri = `${process.env.APP_URL}/auth/callback`;
+    const redirectUri = `${process.env.APP_URL}${OAUTH_CALLBACK_PATH}`;
     // The state value is generated server-side and bound to a signed,
     // HttpOnly cookie rather than trusted from the client. /auth/callback
     // validates the returned state against this cookie before exchanging
@@ -228,12 +229,15 @@ export async function createApp() {
     // into completing an OAuth flow initiated with the attacker's own code
     // (login CSRF / session fixation).
     const state = crypto.randomBytes(16).toString("hex");
-    res.cookie(OAUTH_STATE_COOKIE, state, {
+    // Each attempt has a separate cookie so simultaneous tabs can complete
+    // in any order, even when both requested their URLs at the same time.
+    res.setHeader("Cache-Control", "no-store");
+    res.cookie(oauthStateCookie(state), state, {
       httpOnly: true,
       secure: isProd,
       sameSite: "lax",
       signed: true,
-      path: "/",
+      path: OAUTH_CALLBACK_PATH,
       maxAge: 1000 * 60 * 10, // 10 minutes; only needs to survive the redirect round trip
     });
     const params = new URLSearchParams({
@@ -248,11 +252,17 @@ export async function createApp() {
 
   app.get(["/auth/callback", "/auth/callback/"], async (req, res) => {
     const code = req.query.code as string;
-    const state = (req.query.state as string) || "";
-
-    const savedState = (req as any).signedCookies?.[OAUTH_STATE_COOKIE];
-    res.clearCookie(OAUTH_STATE_COOKIE, { path: "/" });
-    if (!savedState || savedState !== state) {
+    const state = req.query.state;
+    if (typeof state !== "string" || !/^[0-9a-f]{32}$/.test(state)) {
+      return res.status(400).send("Invalid or expired authentication request. Please try signing in again.");
+    }
+    const cookieName = oauthStateCookie(state);
+    if (req.signedCookies?.[cookieName] === state) {
+      res.clearCookie(cookieName, { path: OAUTH_CALLBACK_PATH });
+    } else if (req.signedCookies?.oauth_state === state) {
+      // Let an attempt started before a deploy finish with its old cookie.
+      res.clearCookie("oauth_state", { path: "/" });
+    } else {
       return res.status(400).send("Invalid or expired authentication request. Please try signing in again.");
     }
 
@@ -261,7 +271,7 @@ export async function createApp() {
     }
 
     try {
-      const redirectUri = `${process.env.APP_URL}/auth/callback`;
+      const redirectUri = `${process.env.APP_URL}${OAUTH_CALLBACK_PATH}`;
       const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
         method: "POST",
         headers: {

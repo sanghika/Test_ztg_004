@@ -2,10 +2,9 @@
 // fresh OAuth `state` and stores that state in a signed, HttpOnly cookie, which
 // /auth/callback checks later. Fetching it only after the click leaves the popup
 // blank for one round trip, so it is fetched a moment earlier: on hover, focus or
-// touch of the Connect button. A prefetched URL is used once, and only for a short
-// time. Each request replaces the state cookie, so the newest URL is the one the
-// cookie matches. The short life keeps an old URL from being used after another
-// tab has fetched a newer one, or after the cookie's 10 minutes are up.
+// touch of the Connect button. Each attempt has its own cookie, so another
+// tab can prefetch or connect independently. The local cache holds each URL
+// for at most 30 seconds and hands it out at most once.
 
 export const AUTH_URL_TTL_MS = 30_000;
 

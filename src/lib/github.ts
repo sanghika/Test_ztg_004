@@ -1,5 +1,6 @@
 import { estimateBytesFromBase64, MAX_TOTAL_UPLOAD_BYTES, MAX_SINGLE_FILE_BYTES } from "./uploadLimits";
 import { extractZipEntries } from "./zipExtract";
+import { shouldSkipUploadPath } from "./uploadPaths";
 import { prewarmWorker, runWorkerJob, takeWorker, workersSupported, WorkerUnavailableError } from "./workerJob";
 import { encodeUploadBody, type PreparedUploadBody } from "./uploadBody";
 
@@ -95,32 +96,6 @@ export const extractZip = async (
   return extractZipOnMainThread(file, onProgress);
 };
 
-// Folders selected via <input webkitdirectory> or dragged onto the dropzone
-// commonly carry these — build tooling output, VCS metadata, OS cruft — none
-// of which should ever land in the pushed repo.
-const EXCLUDED_DIR_NAMES = new Set([
-  "node_modules",
-  ".git",
-  ".next",
-  ".nuxt",
-  ".cache",
-  ".turbo",
-  ".parcel-cache",
-  "dist",
-  "build",
-  "coverage",
-  "__MACOSX",
-  ".DS_Store",
-]);
-const EXCLUDED_FILE_NAMES = new Set([".DS_Store", "Thumbs.db"]);
-
-const shouldSkipPath = (relativePath: string): boolean => {
-  const segments = relativePath.split("/");
-  const fileName = segments[segments.length - 1];
-  if (EXCLUDED_FILE_NAMES.has(fileName)) return true;
-  return segments.some((seg) => EXCLUDED_DIR_NAMES.has(seg));
-};
-
 const fileToBase64 = (file: File): Promise<string> =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -143,8 +118,8 @@ export const extractFolder = async (
   onProgress?: (filename: string) => void
 ): Promise<ExtractedFile[]> => {
   const entries = files
-    .map((file) => ({ file, path: (file as any).webkitRelativePath || file.name }))
-    .filter(({ path }) => !shouldSkipPath(path));
+    .map((file) => ({ file, path: file.webkitRelativePath || file.name }))
+    .filter(({ path }) => !shouldSkipUploadPath(path));
 
   if (entries.length === 0) {
     throw new Error("This folder doesn't contain any files to upload.");
@@ -203,48 +178,39 @@ export const extractFolder = async (
 // extractFolder exactly like one chosen via the <input webkitdirectory>
 // picker. Falls back gracefully if the browser doesn't support this API.
 export const filesFromDataTransferItems = async (items: DataTransferItemList): Promise<File[]> => {
-  const readEntry = (entry: any, pathPrefix: string): Promise<File[]> => {
-    return new Promise((resolve) => {
-      if (entry.isFile) {
-        entry.file((file: File) => {
-          try {
-            Object.defineProperty(file, "webkitRelativePath", {
-              value: pathPrefix + file.name,
-              configurable: true,
-            });
-          } catch {
-            // Some browsers don't allow redefining this; extractFolder falls
-            // back to file.name in that case, which is still usable for a
-            // single-level drop.
-          }
-          resolve([file]);
-        });
-      } else if (entry.isDirectory) {
-        const reader = entry.createReader();
-        const allEntries: any[] = [];
-        const readBatch = () => {
-          reader.readEntries(async (batch: any[]) => {
-            if (batch.length === 0) {
-              const nested = await Promise.all(
-                allEntries.map((e) => readEntry(e, pathPrefix + entry.name + "/"))
-              );
-              resolve(nested.flat());
-            } else {
-              allEntries.push(...batch);
-              readBatch(); // directory reads can be paginated; keep going
-            }
-          });
-        };
-        readBatch();
-      } else {
-        resolve([]);
+  const readEntry = async (entry: FileSystemEntry, pathPrefix: string): Promise<File[]> => {
+    const path = pathPrefix + entry.name;
+    if (shouldSkipUploadPath(path)) return [];
+
+    if (entry.isFile) {
+      const file = await new Promise<File>((resolve, reject) => {
+        (entry as FileSystemFileEntry).file(resolve, () => reject(new Error(`Could not read "${path}".`)));
+      });
+      try {
+        Object.defineProperty(file, "webkitRelativePath", { value: path, configurable: true });
+      } catch {
+        // Some browsers already provide this property or disallow overriding it.
       }
-    });
+      return [file];
+    }
+    if (!entry.isDirectory) return [];
+
+    const reader = (entry as FileSystemDirectoryEntry).createReader();
+    const entries: FileSystemEntry[] = [];
+    while (true) {
+      const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => {
+        reader.readEntries(resolve, () => reject(new Error(`Could not read folder "${path}".`)));
+      });
+      if (!batch.length) break;
+      entries.push(...batch);
+    }
+    const nested = await Promise.all(entries.map((child) => readEntry(child, path + "/")));
+    return nested.flat();
   };
 
   const topLevel = Array.from(items)
     .map((item) => (item.kind === "file" ? item.webkitGetAsEntry?.() : null))
-    .filter((entry): entry is any => !!entry);
+    .filter((entry): entry is FileSystemEntry => !!entry);
 
   const nested = await Promise.all(topLevel.map((entry) => readEntry(entry, "")));
   return nested.flat();
