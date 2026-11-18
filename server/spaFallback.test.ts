@@ -31,7 +31,7 @@ describe("SPA fallback in production", () => {
     fs.mkdirSync(path.join(dist, "assets"), { recursive: true });
     fs.mkdirSync(path.join(dist, "faq"), { recursive: true });
     fs.writeFileSync(path.join(dist, "index.html"), "<html>home</html>");
-    fs.writeFileSync(path.join(dist, "200.html"), "<html>shell</html>");
+    fs.writeFileSync(path.join(dist, "404.html"), "<html>Page not found</html>");
     fs.writeFileSync(path.join(dist, "faq", "index.html"), "<html>faq</html>");
     fs.writeFileSync(path.join(dist, "assets", "app-1.js"), "console.log(1)");
     process.env.GITHUB_CLIENT_ID = "id";
@@ -68,15 +68,28 @@ describe("SPA fallback in production", () => {
     expect(res.headers["cache-control"]).toBe("no-cache");
   });
 
-  it("still serves the page for routes: prerendered ones and unknown ones", async () => {
+  it("serves known pages with 200 and unknown pages with a 404 document", async () => {
     const home = await request(app).get("/");
     expect(home.status).toBe(200);
     expect(home.text).toContain("home");
     const faq = await request(app).get("/faq");
     expect(faq.status).toBe(200);
     expect(faq.text).toContain("faq");
-    const unknown = await request(app).get("/some/client/route");
-    expect(unknown.status).toBe(200);
-    expect(unknown.text).toContain("shell");
+    for (const url of ["/some/client/route", "/unknown.html", "/404.html", "/200.html"]) {
+      const unknown = await request(app).get(url);
+      expect(unknown.status, url).toBe(404);
+      expect(unknown.text, url).toContain("Page not found");
+    }
+  });
+
+  it("redirects known HTML aliases and preserves their query strings", async () => {
+    for (const url of ["/faq/index.html?from=legacy", "/f%61q/%69ndex.html?from=legacy"]) {
+      const res = await request(app).get(url);
+      expect(res.status).toBe(308);
+      expect(res.headers.location).toBe("/faq?from=legacy");
+    }
+    const res = await request(app).head("/index.html");
+    expect(res.status).toBe(308);
+    expect(res.headers.location).toBe("/");
   });
 });

@@ -1,7 +1,9 @@
-import { useState, useEffect, useLayoutEffect, useMemo, useRef, useId, lazy, Suspense } from "react";
+import { Component, useState, useEffect, useLayoutEffect, useMemo, useRef, useId, lazy, Suspense } from "react";
 import { fetchRepositories, type BootstrapData, type RepoSummary, warmZipExtractor, extractZip, extractFolder, filesFromDataTransferItems, uploadToGitHub, ExtractedFile, fetchRepoTree, deleteRepoPaths, deleteRepository, createRepository, logout as apiLogout, RepoTreeEntry } from "./lib/github";
 import { trackEvent } from "./lib/analytics";
 import { mergeRepos } from "./lib/repos";
+import { SECRET_SCAN_NOTE } from "./lib/uploadLimits";
+import type { SanitizeReport } from "./lib/secretScanner";
 import { avatarSrc, AVATAR_PX } from "./lib/avatar";
 import { Alert, CARD_EDGE, CTRL, StepBadge, T, useMediaQuery, type StepStatus } from "./components/ui";
 import { LogOut, Upload, Loader2, CheckCircle, AlertCircle, FileArchive, X, Check, ChevronDown, Folder, FolderOpen, Trash2, ShieldCheck, Plus, Lock, Globe, ExternalLink } from "lucide-react";
@@ -12,6 +14,26 @@ export { fetchBootstrap } from "./lib/github";
 const loadSecretScanner = () => import("./lib/secretScanner");
 const loadRepoFileTree = () => import("./components/RepoFileTree");
 const RepoFileTree = lazy(loadRepoFileTree);
+
+class RepoFileTreeErrorBoundary extends Component<{ children: React.ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <Alert variant="error" className="mb-3">
+        <p>Couldn’t open the file list.</p>
+        <button type="button" className="mt-2 underline" onClick={() => window.location.reload()}>
+          Reload page
+        </button>
+      </Alert>
+    );
+  }
+}
 
 type UploadSource = { kind: "zip" | "folder"; name: string };
 
@@ -184,6 +206,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   const [pushErrorMsg, setPushErrorMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [secretWarningMsg, setSecretWarningMsg] = useState<string | null>(null);
+  const [pendingScan, setPendingScan] = useState<{ sanitized: ExtractedFile[]; report: SanitizeReport } | null>(null);
 
   // --- File/folder deletion (manage existing repo contents) --- //
   // Which view the dashboard shows. "manage" is the file manager + danger zone;
@@ -253,6 +276,8 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
     setUploadSuccessUrl(null);
     setPushResult(null);
     setPushErrorMsg(null);
+    setSecretWarningMsg(null);
+    setPendingScan(null);
   };
 
   // Resets everything tied to "which repo is selected" — shared by both the
@@ -268,7 +293,6 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
     setShowDeleteRepoConfirm(false);
     setDeleteRepoConfirmText("");
     setDeleteRepoErrorMsg(null);
-    setSecretWarningMsg(null);
   };
 
   const handleRepoSelectChange = (value: string) => {
@@ -450,7 +474,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   };
 
   const handleUpload = async () => {
-    if (!selectedRepoFullId || extractedFiles.length === 0) return;
+    if (isUploading || !selectedRepoFullId || !selectedSource || isExtracting || extractedFiles.length === 0 || isCreatingRepo) return;
 
     // If it was already successful, open the link instead
     if (uploadSuccessUrl) {
@@ -460,48 +484,54 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
 
     setIsUploading(true);
     setPushErrorMsg(null);
-    setSecretWarningMsg(null);
+    setUploadStatusMsg(pendingScan ? "Starting upload…" : "Checking files…");
     setUploadProgress({ current: 0, total: 0 });
     const [owner, repo] = selectedRepoFullId.split("/");
+    const version = sourceVersion.current;
 
-    // Scan for and strip out secrets (API keys, tokens, .env files, private keys, etc.)
-    // before pushing, so a leaked credential in the ZIP doesn't cause GitHub's push
-    // protection to reject the upload.
-    // sanitizeFiles is async and yields back to the event loop periodically
-    // (like extractZip), so the spinner set above actually gets a chance to
-    // paint before this potentially heavy scan/redaction work runs.
-    let sanitizeFiles: Awaited<ReturnType<typeof loadSecretScanner>>["sanitizeFiles"];
-    try {
-      ({ sanitizeFiles } = await loadSecretScanner());
-    } catch (err: any) {
-      // The scanner is a separate download; if it cannot be fetched (offline, or
-      // a deploy replaced the file) nothing has been pushed, so stop cleanly.
-      console.error("Could not load the secret scanner:", err);
-      setPushErrorMsg("Could not load part of the page needed to check your files. Check your connection and try again.");
-      setIsUploading(false);
-      return;
-    }
-    const { sanitized: filesToUpload, report } = await sanitizeFiles(extractedFiles);
-    if (report.skippedFiles.length > 0 || report.redactedFiles.length > 0 || report.unscannedFiles.length > 0) {
+    let scan = pendingScan;
+    if (!scan) {
+      try {
+        const { sanitizeFiles } = await loadSecretScanner();
+        scan = await sanitizeFiles(extractedFiles);
+      } catch (err) {
+        console.error("Could not scan files:", err);
+        setPushErrorMsg("Could not check your files. Refresh the page and try again.");
+        setIsUploading(false);
+        return;
+      }
+      if (version !== sourceVersion.current) {
+        setIsUploading(false);
+        return;
+      }
+      const { report } = scan;
       const parts: string[] = [];
       if (report.skippedFiles.length > 0) {
-        parts.push(`${report.skippedFiles.length} sensitive file(s) excluded (${report.skippedFiles.join(", ")})`);
+        parts.push(`Excluded ${report.skippedFiles.length} sensitive file(s) (${report.skippedFiles.join(", ")})`);
       }
       if (report.redactedFiles.length > 0) {
-        parts.push(`${report.redactedFiles.length} file(s) had secrets redacted before pushing`);
+        parts.push(`Redacted common secrets in ${report.redactedFiles.length} file(s)`);
       }
-      if (report.unscannedFiles.length > 0) {
-        parts.push(`${report.unscannedFiles.length} large file(s) were not scanned for secrets (${report.unscannedFiles.join(", ")})`);
-      }
-      setSecretWarningMsg(parts.join(" · "));
+      setSecretWarningMsg(parts.length ? parts.join(" · ") : null);
       if (report.skippedFiles.length > 0 || report.redactedFiles.length > 0) {
         trackEvent("secrets_sanitized", {
           skipped_count: report.skippedFiles.length,
           redacted_count: report.redactedFiles.length,
         });
       }
+      if (scan.sanitized.length === 0) {
+        setPushErrorMsg("Every file was excluded. Choose a ZIP or folder with files you can push.");
+        setIsUploading(false);
+        return;
+      }
+      if (report.unscannedFiles.length > 0) {
+        setPendingScan(scan);
+        setIsUploading(false);
+        return;
+      }
     }
 
+    const { sanitized: filesToUpload, report } = scan;
     try {
       const commit = await uploadToGitHub(
         owner,
@@ -525,7 +555,8 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
             ? commit.html_url
             : undefined,
       });
-      trackEvent("push_successful", { files_count: extractedFiles.length });
+      setPendingScan(null);
+      trackEvent("push_successful", { files_count: filesToUpload.length });
     } catch (err: any) {
       console.error("Upload error details:", err);
       const apiErrorMsg = err.response?.data?.message;
@@ -616,6 +647,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   const canConfirmDeleteRepo = !!selectedRepoFullId
     && deleteRepoConfirmText === selectedRepoFullId
     && !isDeletingRepo
+    && !isUploading
     && !isLoadingMoreRepos;
 
   const handleDeleteRepo = async () => {
@@ -962,7 +994,16 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
     </div>
   ) : (
     <>
+      {pendingScan && (
+        <Alert variant="warning" className="mb-3">
+          <p>These files exceeded the scan limit and will be pushed without a secret check. Review them before continuing.</p>
+          <ul className="mt-2 max-h-32 overflow-auto list-disc pl-4 break-all" aria-label="Files above the scan limit">
+            {pendingScan.report.unscannedFiles.map((file) => <li key={file}>{file}</li>)}
+          </ul>
+        </Alert>
+      )}
       <button
+        type="button"
         onClick={handleUpload}
         disabled={isUploading || isExtracting || !selectedSource || extractedFiles.length === 0 || !selectedRepoFullId || isCreatingRepo}
         aria-describedby={pushBlocker ? "push-hint" : undefined}
@@ -975,7 +1016,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
             <Loader2 className="w-5 h-5 animate-spin" /> Pushing…
           </>
         ) : (
-          "Push files"
+          pendingScan ? "Push without scanning these files" : "Push files"
         )}
       </button>
       {isUploading && (
@@ -1019,7 +1060,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
         {!pushResult && (
           <p className="mt-3 text-sm flex items-start gap-2 text-muted">
             <ShieldCheck className="w-4 h-4 mt-0.5 shrink-0 text-emerald-700 dark:text-emerald-400" />
-            <span>Secret scanning is on: sensitive files are skipped and secrets redacted before anything is pushed.</span>
+            <span>{SECRET_SCAN_NOTE}</span>
           </p>
         )}
       </section>
@@ -1079,16 +1120,18 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
                       Deleting a folder still removes everything inside it.
                     </Alert>
                   )}
-                  <Suspense
-                    fallback={
-                      <div className="flex items-center justify-center py-6 mb-3" role="status">
-                        <Loader2 className="w-5 h-5 text-muted animate-spin" />
-                        <span className="sr-only">Loading files…</span>
-                      </div>
-                    }
-                  >
-                    <RepoFileTree entries={repoTree} selected={selectedDeletePaths} onChange={setSelectedDeletePaths} />
-                  </Suspense>
+                  <RepoFileTreeErrorBoundary key={selectedRepoFullId}>
+                    <Suspense
+                      fallback={
+                        <div className="flex items-center justify-center py-6 mb-3" role="status">
+                          <Loader2 className="w-5 h-5 text-muted animate-spin" />
+                          <span className="sr-only">Loading files…</span>
+                        </div>
+                      }
+                    >
+                      <RepoFileTree entries={repoTree} selected={selectedDeletePaths} onChange={setSelectedDeletePaths} />
+                    </Suspense>
+                  </RepoFileTreeErrorBoundary>
                   {deleteSuccessMsg && (
                     <Alert variant="success" className="mb-3">{deleteSuccessMsg}</Alert>
                   )}

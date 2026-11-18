@@ -1,18 +1,7 @@
-// Single source of truth for the pages that are prerendered to static HTML.
-// Used by App.tsx (the <title> each page sets) and by the prerender step
-// (scripts/prerender.mjs, through src/entry-server.tsx), so the title in the
-// static HTML and the title React sets after hydration can never differ.
-//
-// "/" is prerendered too, but keeps the title and description that
-// index.html already has, so it has no entry here.
-
 export const SITE_ORIGIN = "https://ziptogit.in";
 
-// The home page's <title>. It is the one in index.html, which is what the
-// prerendered "/" ships with, and App.tsx sets it again when the home screen
-// mounts (so coming back to "/" from another page restores it). The two must
-// stay identical: src/routes.test.ts compares them.
 export const HOME_TITLE = "ZiptoGit - Push ZIP Archives Directly to GitHub";
+export const HOME_DESCRIPTION = "Securely upload your AI Studio ZIP exports and push their extracted contents directly to your GitHub repositories without needing a local Git environment or CLI.";
 
 // Shown in the tab as "<title> | ZiptoGit".
 export const PAGE_TITLES = {
@@ -33,16 +22,36 @@ export const PAGE_DESCRIPTIONS: Record<keyof typeof PAGE_TITLES, string> = {
 
 export type PrerenderRoute = {
   path: string;
-  /** Full <title> text. Omitted for "/", which keeps index.html's own. */
-  title?: string;
-  description?: string;
+  title: string;
+  description: string;
+  noindex?: boolean;
 };
 
-export const PRERENDER_ROUTES: PrerenderRoute[] = [
-  { path: "/" },
+const publicPages: PrerenderRoute[] = [
+  { path: "/", title: HOME_TITLE, description: HOME_DESCRIPTION },
   ...(Object.keys(PAGE_TITLES) as (keyof typeof PAGE_TITLES)[]).map((path) => ({
     path,
     title: `${PAGE_TITLES[path]} | ZiptoGit`,
     description: PAGE_DESCRIPTIONS[path],
   })),
 ];
+
+export const NOT_FOUND_PAGE: PrerenderRoute = {
+  path: "/404",
+  title: "Page not found | ZiptoGit",
+  description: "The page you requested could not be found.",
+  noindex: true,
+};
+
+export const PRERENDER_ROUTES = [...publicPages, NOT_FOUND_PAGE];
+
+export function findPublicPage(pathname: string): PrerenderRoute | undefined {
+  try {
+    const path = pathname.replace(/\/+$/, "").split("/")
+      .map((segment) => decodeURIComponent(segment).replaceAll("/", "%2F"))
+      .join("/").toLowerCase() || "/";
+    return publicPages.find((page) => page.path === path);
+  } catch {
+    return undefined;
+  }
+}

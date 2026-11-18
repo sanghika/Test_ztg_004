@@ -1,3 +1,7 @@
+const SECRET_SCAN_LIMIT_MIB = 5;
+export const MAX_SCAN_BYTES = SECRET_SCAN_LIMIT_MIB * 1024 * 1024;
+export const SECRET_SCAN_NOTE = `Your browser checks eligible text files up to ${SECRET_SCAN_LIMIT_MIB} MiB for common secrets. Binary files and some asset formats are excluded from the scan.`;
+
 import type { ExtractedFile } from "./github";
 
 // These two must stay in sync with the body limit server.ts puts on the

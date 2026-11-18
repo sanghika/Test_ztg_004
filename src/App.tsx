@@ -1,10 +1,11 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, Fragment, useSyncExternalStore } from "react";
-import { BrowserRouter, Routes, Route, Link } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Link, useLocation, useNavigationType } from "react-router-dom";
 import type { BootstrapData } from "./lib/github";
 import { trackEvent, trackPageView } from "./lib/analytics";
 import { prefetchAuthUrl, takeAuthUrl } from "./lib/authUrl";
 import { readSessionFlag, clearSessionFlag, sessionPending, endSessionPending } from "./lib/session";
-import { PAGE_TITLES, HOME_TITLE } from "./routes";
+import { findPublicPage, NOT_FOUND_PAGE, PAGE_TITLES, SITE_ORIGIN } from "./routes";
+import { SECRET_SCAN_NOTE } from "./lib/uploadLimits";
 import { Github, Loader2, CheckCircle, ShieldCheck, Sun, Moon, Menu, X } from "lucide-react";
 import { Alert, CARD_EDGE, CTRL, StepBadge, T, useMediaQuery } from "./components/ui";
 
@@ -188,8 +189,7 @@ function BrandLink() {
   );
 }
 
-function PageLayout({ children, title }: { children: React.ReactNode, title?: string }) {
-  usePageTracking(title, title ? `${title} | ZiptoGit` : undefined);
+function PageLayout({ children }: { children: React.ReactNode }) {
   const { theme, toggleTheme } = useTheme();
 
   return (
@@ -206,23 +206,60 @@ function PageLayout({ children, title }: { children: React.ReactNode, title?: st
   );
 }
 
-// Tracks page views (GA) and sets the document title. Shared by PageLayout
-// (content pages) and HomeLayout (the main app screen), which has its own
-// wider desktop shell but needs the same tracking behavior. `title` is the
-// short screen name sent to analytics; `documentTitle` is the full tab title,
-// and must equal what the prerendered HTML already has for that page, so a
-// crawler without JS and a browser after mount see the same <title>.
-function usePageTracking(title: string | undefined, documentTitle: string | undefined) {
+function RouteEffects() {
+  const { pathname, key } = useLocation();
+  const navigationType = useNavigationType();
+  const previousPath = useRef(pathname);
+  const scrollPositions = useRef(new Map<string, number>());
+
   useEffect(() => {
-    trackPageView(title);
-    if (documentTitle) document.title = documentTitle;
-  }, [title, documentTitle]);
+    const page = findPublicPage(pathname) ?? NOT_FOUND_PAGE;
+    const url = SITE_ORIGIN + page.path;
+    document.title = page.title;
+    document.querySelector('link[rel="canonical"]')?.setAttribute("href", url);
+    const tags = {
+      'meta[name="description"]': page.description,
+      'meta[name="robots"]': page.noindex ? "noindex, follow" : "index, follow",
+      'meta[property="og:title"]': page.title,
+      'meta[property="og:description"]': page.description,
+      'meta[property="og:url"]': url,
+      'meta[name="twitter:title"]': page.title,
+      'meta[name="twitter:description"]': page.description,
+    };
+    for (const [selector, content] of Object.entries(tags)) {
+      document.querySelector(selector)?.setAttribute("content", content);
+    }
+    trackPageView(page.path === "/" ? "Home" : PAGE_TITLES[page.path as keyof typeof PAGE_TITLES] ?? "Page not found");
+  }, [pathname]);
+
+  useLayoutEffect(() => {
+    const previous = history.scrollRestoration;
+    history.scrollRestoration = "manual";
+    return () => { history.scrollRestoration = previous; };
+  }, []);
+
+  useLayoutEffect(() => {
+    if (previousPath.current !== pathname) {
+      previousPath.current = pathname;
+      const heading = document.querySelector<HTMLElement>("main h1") ?? document.querySelector<HTMLElement>("main");
+      if (heading) {
+        heading.tabIndex = -1;
+        heading.focus({ preventScroll: true });
+      }
+      window.scrollTo(0, navigationType === "POP" ? scrollPositions.current.get(key) ?? 0 : 0);
+    }
+    const saveScroll = () => scrollPositions.current.set(key, window.scrollY);
+    saveScroll();
+    window.addEventListener("scroll", saveScroll, { passive: true });
+    return () => window.removeEventListener("scroll", saveScroll);
+  }, [key, pathname, navigationType]);
+
+  return null;
 }
 
 // --- Home screen shell: full-width desktop layout with the app card
 // centered in the middle of the page. --- //
 function HomeLayout() {
-  usePageTracking("Home", HOME_TITLE);
   const { theme, toggleTheme } = useTheme();
 
   return (
@@ -286,9 +323,14 @@ function useInView(ref: { current: Element | null }) {
 // links move into a menu behind a button, the toggle stays visible).
 function SiteHeader({ widthClass, theme, onToggleTheme }: { widthClass: string; theme: Theme; onToggleTheme: () => void }) {
   const [open, setOpen] = useState(false);
+  const menuButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      menuButton.current?.focus();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open]);
@@ -308,6 +350,7 @@ function SiteHeader({ widthClass, theme, onToggleTheme }: { widthClass: string; 
           <ThemeToggle theme={theme} onToggle={onToggleTheme} />
           <button
             type="button"
+            ref={menuButton}
             onClick={() => setOpen((o) => !o)}
             aria-expanded={open}
             aria-controls="mobile-menu"
@@ -324,7 +367,7 @@ function SiteHeader({ widthClass, theme, onToggleTheme }: { widthClass: string; 
             className="sm:hidden absolute right-0 top-full -mt-2 z-20 w-56 rounded-panel border border-edge bg-surface elevation-raised p-2"
           >
             {NAV_LINKS.map(([to, label]) => (
-              <Link key={to} to={to} className={linkClass}>{label}</Link>
+              <Link key={to} to={to} onClick={() => setOpen(false)} className={linkClass}>{label}</Link>
             ))}
           </nav>
         )}
@@ -560,7 +603,7 @@ function ZipUploader() {
       {errorMsg && <div className="w-full"><Alert variant="error" className="mt-3">{errorMsg}</Alert></div>}
       <p className="mt-6 flex items-start gap-2 text-sm text-muted max-w-copy">
         <ShieldCheck className="w-4 h-4 mt-0.5 shrink-0 text-emerald-700 dark:text-emerald-400" />
-        <span>Files are scanned for secrets in your browser before anything is pushed.</span>
+        <span>{SECRET_SCAN_NOTE}</span>
       </p>
     </>
   );
@@ -594,21 +637,20 @@ function ZipUploader() {
 // Bump this whenever the Privacy policy copy below actually changes — it must
 // never be computed at render time (was `new Date().toLocaleDateString()`,
 // which falsely told every visitor the policy was updated that same day).
-const PRIVACY_LAST_UPDATED = "August 10, 2026";
-// Same rule for the Terms. Set to the Privacy date because the two were last
-// edited together; change it whenever the Terms copy changes.
+const PRIVACY_LAST_UPDATED = "November 18, 2026";
+// Change this date whenever the Terms copy changes.
 const TERMS_LAST_UPDATED = "August 10, 2026";
 
 function PrivacyPage() {
   return (
-    <PageLayout title={PAGE_TITLES["/privacy"]}>
+    <PageLayout>
       <div className={`w-full max-w-content ${CARD_EDGE} p-6 sm:p-12 ${T.prose}`}>
         <h1 className={`${T.h1} text-ink dark:text-white mb-6`}>Privacy policy</h1>
         <p className="mb-4 text-sm text-muted">Last updated: {PRIVACY_LAST_UPDATED}</p>
         <h2 className={`${T.h2} mt-6 mb-3`}>1. Information we collect</h2>
         <p className="mb-4">ZiptoGit requests OAuth access to your GitHub account to push files directly to your repositories. We do not store your repository contents or your source code on our servers.</p>
         <h2 className={`${T.h2} mt-6 mb-3`}>2. How we use information</h2>
-        <p className="mb-4">Your GitHub access token is never stored in your browser. It is held only in a secure, HttpOnly server-side session used to interface with the GitHub API on your behalf to perform ZIP extraction and commit operations.</p>
+        <p className="mb-4">Your browser stores your GitHub access token in a signed HttpOnly session cookie. HttpOnly prevents page scripts from reading it. The server uses the cookie to make GitHub API requests on your behalf. The cookie expires after 30 days or is cleared when you disconnect.</p>
         <h2 className={`${T.h2} mt-6 mb-3`}>3. Third-party services</h2>
         <p className="mb-4">We use Google Analytics to monitor usage and improve the tool. We do not sell your data.</p>
       </div>
@@ -618,7 +660,7 @@ function PrivacyPage() {
 
 function TermsPage() {
   return (
-    <PageLayout title={PAGE_TITLES["/terms"]}>
+    <PageLayout>
       <div className={`w-full max-w-content ${CARD_EDGE} p-6 sm:p-12 ${T.prose}`}>
         <h1 className={`${T.h1} text-ink dark:text-white mb-6`}>Terms of service</h1>
         <p className="mb-4 text-sm text-muted">Last updated: {TERMS_LAST_UPDATED}</p>
@@ -636,7 +678,7 @@ function TermsPage() {
 
 function ContactPage() {
   return (
-    <PageLayout title={PAGE_TITLES["/contact"]}>
+    <PageLayout>
       <div className={`w-full max-w-content ${CARD_EDGE} p-6 sm:p-12 ${T.prose}`}>
         <h1 className={`${T.h1} text-ink dark:text-white mb-6`}>Contact</h1>
         <p className="mb-8">Have a question, feedback, or need support? Reach out directly.</p>
@@ -653,11 +695,11 @@ function ContactPage() {
 const HOW_IT_WORKS_STEPS = [
   {
     title: "Connect GitHub",
-    body: "Sign in with your GitHub account. Your access token is kept in a secure server-side session — never in your browser’s storage.",
+    body: "Sign in with your GitHub account. Your browser keeps the access token in an HttpOnly cookie for the server to use when making GitHub API requests.",
   },
   {
     title: "Upload ZIP",
-    body: "Add your AI Studio ZIP export by dropping it in or choosing it from your files. The files are unzipped and scanned for secrets right in your browser before anything leaves your device.",
+    body: `Add your AI Studio ZIP export by dropping it in or choosing it from your files. ZiptoGit extracts it in your browser. ${SECRET_SCAN_NOTE}`,
   },
   {
     title: "Sync directly",
@@ -667,7 +709,7 @@ const HOW_IT_WORKS_STEPS = [
 
 function HowItWorksPage() {
   return (
-    <PageLayout title={PAGE_TITLES["/how-it-works"]}>
+    <PageLayout>
       <div className={`w-full max-w-content ${CARD_EDGE} p-6 sm:p-12 ${T.prose}`}>
         <h1 className={`${T.h1} text-ink dark:text-white mb-6`}>How it works</h1>
         <ol className="space-y-6">
@@ -689,13 +731,13 @@ function HowItWorksPage() {
 
 function FAQPage() {
   const faqs = [
-    { q: "Is my code secure?", a: "Yes. Your ZIP is extracted and scanned for secrets right in your browser. The push to GitHub is then proxied through our server using a secure, HttpOnly session — your GitHub access token is never sent to or stored in your browser." },
+    { q: "How are my files and GitHub token handled?", a: `ZiptoGit extracts your ZIP in your browser. ${SECRET_SCAN_NOTE} The server sends your files to GitHub using the access token from your browser’s HttpOnly session cookie.` },
     { q: "What does ZiptoGit cost?", a: "It is currently completely free to use." },
     { q: "Can I use it for private repositories?", a: "Yes. When you authenticate via OAuth, you grant the app access to read and commit to repositories you have permissions for." }
   ];
 
   return (
-    <PageLayout title={PAGE_TITLES["/faq"]}>
+    <PageLayout>
       <div className={`w-full max-w-content ${CARD_EDGE} p-6 sm:p-12 ${T.prose}`}>
         <h1 className={`${T.h1} text-ink dark:text-white mb-6`}>Frequently asked questions</h1>
         <div className="space-y-4">
@@ -706,6 +748,18 @@ function FAQPage() {
             </div>
           ))}
         </div>
+      </div>
+    </PageLayout>
+  );
+}
+
+function NotFoundPage() {
+  return (
+    <PageLayout>
+      <div className={`w-full max-w-content ${CARD_EDGE} p-6 sm:p-12 ${T.prose}`}>
+        <h1 className={`${T.h1} text-ink dark:text-white mb-3`}>Page not found</h1>
+        <p className="mb-6">The address may have changed, or the link may be incorrect.</p>
+        <Link to="/" className="text-primary font-medium underline">Go to homepage</Link>
       </div>
     </PageLayout>
   );
@@ -723,6 +777,7 @@ export function AppRoutes() {
       <Route path="/terms" element={<TermsPage />} />
       <Route path="/faq" element={<FAQPage />} />
       <Route path="/contact" element={<ContactPage />} />
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
   );
 }
@@ -730,6 +785,7 @@ export function AppRoutes() {
 export default function App() {
   return (
     <BrowserRouter>
+      <RouteEffects />
       <AppRoutes />
     </BrowserRouter>
   );
