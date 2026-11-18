@@ -7,6 +7,11 @@ const template = [
   '<meta name="description" content="Home description" />',
   '<link rel="canonical" href="https://ziptogit.in/" />',
   '<meta property="og:url" content="https://ziptogit.in/" />',
+  '<meta property="og:title" content="ZiptoGit - Home" />',
+  '<meta property="og:description" content="Home description" />',
+  '<meta name="twitter:title" content="ZiptoGit - Home" />',
+  '<meta name="twitter:description" content="Home description" />',
+  '<meta name="robots" content="index, follow" />',
   "</head><body>",
   ROOT_MARKER,
   '<script type="module" src="/assets/index.js"></script>',
@@ -34,6 +39,17 @@ describe("renderPage", () => {
     expect(html).toContain('<meta name="description" content="Questions &amp; answers" />');
     expect(html).toContain('<link rel="canonical" href="https://ziptogit.in/faq" />');
     expect(html).toContain('<meta property="og:url" content="https://ziptogit.in/faq" />');
+    for (const attribute of ['property="og:title"', 'name="twitter:title"']) {
+      expect(html).toContain(`<meta ${attribute} content="FAQ | ZiptoGit" />`);
+    }
+    for (const attribute of ['property="og:description"', 'name="twitter:description"']) {
+      expect(html).toContain(`<meta ${attribute} content="Questions &amp; answers" />`);
+    }
+  });
+
+  it("sets noindex on the prerendered error page", () => {
+    const html = renderPage(template, { path: "/404", noindex: true }, "<h1>Page not found</h1>", ORIGIN);
+    expect(html).toContain('<meta name="robots" content="noindex, follow" />');
   });
 
   it("leaves the home page's own title and description alone", () => {
@@ -78,6 +94,7 @@ describe("outputPathFor", () => {
   it("maps / to index.html and other routes to <slug>/index.html", () => {
     expect(outputPathFor("/")).toBe("index.html");
     expect(outputPathFor("/faq")).toBe("faq/index.html");
+    expect(outputPathFor("/404")).toBe("404.html");
     expect(outputPathFor("/how-it-works")).toBe("how-it-works/index.html");
   });
 

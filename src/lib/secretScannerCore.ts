@@ -3,7 +3,7 @@
 // by secretScanner.ts (small jobs, or a browser without Web Workers).
 // Keep this file free of anything that touches the DOM so both can load it,
 // and import only *types* from ./github so the worker bundle stays small.
-import { estimateBytesFromBase64 } from "./uploadLimits";
+import { estimateBytesFromBase64, MAX_SCAN_BYTES } from "./uploadLimits";
 
 // --- File extensions/paths that are excluded entirely (never pushed) --- //
 // These are files that are almost always sensitive on their own, so redacting
@@ -43,11 +43,7 @@ export const BINARY_EXTENSIONS = new Set([
   "db","sqlite","sqlite3","parquet","npy","npz","pkl","pickle","h5","hdf5","onnx","pt","pth","ckpt","safetensors","tflite",
 ]);
 
-// Files larger than this are not scanned (and are reported as such, see
-// SanitizeReport.unscannedFiles). Source and config files are far smaller; a
-// text file past this size is almost always data, a minified bundle or a
-// lockfile, and scanning it costs memory and time out of proportion.
-export const MAX_SCAN_BYTES = 5 * 1024 * 1024; // 5MB
+export { MAX_SCAN_BYTES };
 
 // --- Secret detection patterns: [name, regex] --- //
 // Each regex should match the secret token itself so it can be redacted in place.

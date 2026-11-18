@@ -17,7 +17,7 @@ export const ROOT_MARKER = '<div id="root"></div>';
 
 /**
  * @param {string} template  dist/index.html as Vite wrote it (empty #root)
- * @param {{path: string, title?: string, description?: string}} route
+ * @param {{path: string, title?: string, description?: string, noindex?: boolean}} route
  * @param {string} appHtml   output of render(route.path)
  * @param {string} origin    e.g. https://ziptogit.in (no trailing slash)
  */
@@ -32,19 +32,24 @@ export function renderPage(template, route, appHtml, origin) {
     () => `<div id="root" data-prerendered="${escapeAttr(route.path)}">${appHtml}</div>`
   );
 
-  const url = origin + (route.path === "/" ? "/" : route.path);
-  html = replaceOnce(html, /(<link rel="canonical" href=")[^"]*(")/, (_, a, b) => a + escapeAttr(url) + b, "the canonical link");
-  html = replaceOnce(html, /(<meta property="og:url" content=")[^"]*(")/, (_, a, b) => a + escapeAttr(url) + b, "og:url");
+  const url = origin + route.path;
+  const setAttribute = (pattern, value, label) => {
+    html = replaceOnce(html, pattern, (_, a, b) => a + escapeAttr(value) + b, label);
+  };
+  setAttribute(/(<link rel="canonical" href=")[^"]*(")/, url, "the canonical link");
+  setAttribute(/(<meta property="og:url" content=")[^"]*(")/, url, "og:url");
   if (route.title) {
     html = replaceOnce(html, /<title>[^<]*<\/title>/, () => `<title>${escapeText(route.title)}</title>`, "the <title>");
+    setAttribute(/(<meta property="og:title" content=")[^"]*(")/, route.title, "og:title");
+    setAttribute(/(<meta name="twitter:title" content=")[^"]*(")/, route.title, "twitter:title");
   }
   if (route.description) {
-    html = replaceOnce(
-      html,
-      /(<meta name="description" content=")[^"]*(")/,
-      (_, a, b) => a + escapeAttr(route.description) + b,
-      "the meta description"
-    );
+    setAttribute(/(<meta name="description" content=")[^"]*(")/, route.description, "the meta description");
+    setAttribute(/(<meta property="og:description" content=")[^"]*(")/, route.description, "og:description");
+    setAttribute(/(<meta name="twitter:description" content=")[^"]*(")/, route.description, "twitter:description");
+  }
+  if (route.noindex) {
+    setAttribute(/(<meta name="robots" content=")[^"]*(")/, "noindex, follow", "robots");
   }
   return html;
 }
@@ -52,6 +57,7 @@ export function renderPage(template, route, appHtml, origin) {
 /** Where a route's HTML goes inside dist/: "/" -> index.html, "/faq" -> faq/index.html. */
 export function outputPathFor(routePath) {
   if (routePath === "/") return "index.html";
+  if (routePath === "/404") return "404.html";
   const slug = routePath.replace(/^\/+|\/+$/g, "");
   if (!/^[a-z0-9-]+$/.test(slug)) throw new Error(`prerender: unsupported route path ${routePath}`);
   return `${slug}/index.html`;

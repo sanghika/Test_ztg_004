@@ -7,7 +7,8 @@
 // Output in dist/:
 //   index.html           "/"  with the signed-out hero already in the markup
 //   <slug>/index.html    /how-it-works, /faq, /privacy, /terms, /contact
-//   200.html             the original empty-#root page, for any other URL
+//   404.html             the prerendered page for unknown URLs
+//   200.html             a copy of the Vite template for repeat builds
 //
 // The h1 that is the page's LCP element is therefore in the HTML itself and
 // paints as soon as the CSS arrives, without waiting for JS or /api/me.
@@ -42,4 +43,3 @@ for (const route of PRERENDER_ROUTES) {
   await writeFile(out, renderPage(template, route, appHtml, SITE_ORIGIN));
   console.log(`prerendered ${route.path.padEnd(16)} -> ${path.relative(process.cwd(), out)}`);
 }
-console.log("wrote dist/200.html (empty shell for other URLs)");

@@ -183,5 +183,68 @@ class DashboardRaces(unittest.TestCase):
                 page.unroute("**/api/logout")
 
 
+    def test_large_text_file_requires_confirmation_before_any_upload(self):
+        page = self.page
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zipped:
+            zipped.writestr("large.txt", "a" * (5 * 1024 * 1024 + 1))
+            zipped.writestr(".env", "EXAMPLE=local")
+        requests = []
+
+        def upload(route):
+            requests.append(route.request.url.rsplit("/", 1)[-1])
+            if requests[-1] == "blobs":
+                route.fulfill(json={"blobs": [{"path": "large.txt", "sha": "a" * 40}]})
+            else:
+                route.fulfill(json={"commit": {"sha": "b" * 40}})
+
+        page.route("**/api/upload/*", upload)
+        page.goto(ORIGIN)
+        page.locator("input[type=file][accept]").set_input_files({
+            "name": "large.zip", "mimeType": "application/zip", "buffer": buffer.getvalue()
+        })
+        section = page.get_by_role("region", name="Push files")
+        push = section.get_by_role("button", name="Push files", exact=True)
+        confirm = section.get_by_role("button", name="Push without scanning these files")
+        push.click()
+        expect(confirm).to_be_visible()
+        expect(page.get_by_role("list", name="Files above the scan limit")).to_have_text("large.txt")
+        self.assertEqual([], requests)
+
+        page.get_by_role("combobox", name="Repository").select_option("demo/second")
+        expect(confirm).to_have_count(0)
+        push.click()
+        expect(confirm).to_be_visible()
+        self.assertEqual([], requests)
+        confirm.click()
+        expect(section.get_by_text("Pushed 1 file to demo/second")).to_be_visible()
+        self.assertEqual(["blobs", "commit"], requests)
+
+    def test_all_excluded_files_stop_before_upload(self):
+        page = self.page
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zipped:
+            zipped.writestr(".env", "EXAMPLE=local")
+        page.goto(ORIGIN)
+        page.locator("input[type=file][accept]").set_input_files({
+            "name": "excluded.zip", "mimeType": "application/zip", "buffer": buffer.getvalue()
+        })
+        page.get_by_role("region", name="Push files").get_by_role("button", name="Push files", exact=True).click()
+        expect(page.get_by_role("alert")).to_contain_text("Every file was excluded.")
+
+    def test_missing_file_tree_chunk_keeps_dashboard_available(self):
+        page = self.page
+        page.route("**/assets/RepoFileTree-*.js", lambda route: route.abort())
+        page.route("**/api/repo-tree?*", lambda route: route.fulfill(json={
+            "tree": [{"type": "blob", "path": "README.md", "sha": "a" * 40}], "truncated": False
+        }))
+        page.goto(ORIGIN)
+        page.get_by_role("button", name="Manage files").click()
+        expect(page.get_by_role("alert")).to_contain_text("Couldn’t open the file list.")
+        expect(page.get_by_role("button", name="Reload page")).to_be_visible()
+        page.get_by_role("button", name="Push files", exact=True).click()
+        expect(page.get_by_role("button", name="Choose ZIP file")).to_be_visible()
+
+
 if __name__ == "__main__":
     unittest.main()

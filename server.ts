@@ -10,6 +10,7 @@ import * as githubService from "./server/githubService";
 import { createSessionData } from "./server/sessionData";
 import { scanPrecompressed, sendPrecompressed, servePrecompressed } from "./server/precompressed";
 import { hasFileExtension } from "./server/spaFallback";
+import { findPublicPage, NOT_FOUND_PAGE, PRERENDER_ROUTES } from "./src/routes";
 
 const TOKEN_COOKIE = "gh_session";
 const OAUTH_STATE_COOKIE = "oauth_state";
@@ -323,8 +324,7 @@ export async function createApp() {
   const sessionData = createSessionData(githubService);
 
   // --- Authenticated GitHub proxy routes --- //
-  // The client never holds the GitHub token; every GitHub API call is made
-  // server-side using the token read from the HttpOnly session cookie.
+  // GitHub API calls run on the server using the token from the HttpOnly cookie.
 
   app.get("/api/me", requireAuth, async (req, res) => {
     try {
@@ -559,6 +559,41 @@ export async function createApp() {
     // was run) the index is empty and everything below works as before.
     const precompressed = scanPrecompressed(distPath);
     const sendOptions = { root: distPath, cacheControl: cacheControlFor };
+    const shellFile = path.join(distPath, "index.html");
+    const pageFiles = new Map(PRERENDER_ROUTES.map((page) => {
+      const file = page.noindex ? path.join(distPath, "404.html") : path.join(distPath, page.path, "index.html");
+      return [page.path, fs.existsSync(file) ? file : shellFile];
+    }));
+    const notFoundPage = pageFiles.get(NOT_FOUND_PAGE.path)!;
+
+    const sendPage = (req: express.Request, res: express.Response, file: string) => {
+      res.setHeader("Cache-Control", "no-cache");
+      const copies = precompressed.byFile.get(file);
+      const sendPlain = () => res.sendFile(file);
+      if (!copies || !sendPrecompressed(req, res, copies, sendOptions, sendPlain)) sendPlain();
+    };
+
+    // Redirect direct links to prerendered HTML before static middleware serves them.
+    app.use((req, res, next) => {
+      if (req.method !== "GET" && req.method !== "HEAD") return next();
+      const separator = req.path.lastIndexOf("/");
+      const directory = req.path.slice(0, separator);
+      let filename: string;
+      try {
+        filename = decodeURIComponent(req.path.slice(separator + 1)).toLowerCase();
+      } catch {
+        return next();
+      }
+      if (!directory && (filename === "404.html" || filename === "200.html")) {
+        return sendPage(req, res.status(404), notFoundPage);
+      }
+      if (filename !== "index.html") return next();
+      const page = findPublicPage(directory || "/");
+      if (!page) return next();
+      const queryAt = req.originalUrl.indexOf("?");
+      return res.redirect(308, page.path + (queryAt === -1 ? "" : req.originalUrl.slice(queryAt)));
+    });
+
     app.use(servePrecompressed(precompressed, sendOptions));
 
     app.use(
@@ -574,39 +609,14 @@ export async function createApp() {
       })
     );
 
-    // `npm run build` prerenders the home page and the content pages into
-    // static HTML (scripts/prerender.mjs): dist/index.html for "/" and
-    // dist/<slug>/index.html for the rest, so the first paint needs no JS.
-    // Anything else (an unknown URL) gets dist/200.html, the same page with an
-    // EMPTY #root, which the client renders from scratch. That split matters:
-    // serving a prerendered page for a different URL would not match what
-    // React renders and would throw away the server HTML on hydration.
-    // If only `vite build` was run, dist/index.html is itself the empty shell.
-    const prerenderedPages = new Map<string, string | null>();
-    const prerenderedPageFor = (urlPath: string): string | null => {
-      const slug = urlPath.replace(/^\/+|\/+$/g, "");
-      if (slug !== "" && !/^[a-z0-9-]+$/.test(slug)) return null; // never build a path from anything else
-      if (!prerenderedPages.has(slug)) {
-        const file = slug === "" ? path.join(distPath, "index.html") : path.join(distPath, slug, "index.html");
-        prerenderedPages.set(slug, fs.existsSync(file) ? file : null);
-      }
-      return prerenderedPages.get(slug)!;
-    };
-    const shellFile = fs.existsSync(path.join(distPath, "200.html"))
-      ? path.join(distPath, "200.html")
-      : path.join(distPath, "index.html");
-
     app.get("*", (req, res) => {
-      res.setHeader("Cache-Control", "no-cache");
-      // Everything above that exists on disk was already sent by express.static.
-      // A path with a file extension that got this far does not exist, so it is a
-      // 404, not the app page (see server/spaFallback.ts).
-      if (hasFileExtension(req.path)) return res.status(404).type("text/plain").send("Not found");
-      const page = prerenderedPageFor(req.path) ?? shellFile;
-      const copies = precompressed.byFile.get(page);
-      // If the compressed copy cannot be read, send the plain page instead.
-      if (copies && sendPrecompressed(req, res, copies, sendOptions, () => res.sendFile(page))) return;
-      res.sendFile(page);
+      const page = findPublicPage(req.path);
+      if (page) return sendPage(req, res, pageFiles.get(page.path)!);
+      // Keep missing asset and API responses out of the HTML error page.
+      if (req.path.startsWith("/api/") || (hasFileExtension(req.path) && !/\.html?$/i.test(req.path))) {
+        return res.status(404).setHeader("Cache-Control", "no-cache").type("text/plain").send("Not found");
+      }
+      return sendPage(req, res.status(404), notFoundPage);
     });
   }
 
