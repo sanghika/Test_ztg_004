@@ -1,4 +1,4 @@
-"""Production browser regressions for dashboard selections.
+"""Production browser regressions for uploads, deletions, and sign-out.
 
 Start the app with npm run build && NODE_ENV=production npm start.
 With Python Playwright and Chromium installed, run python scripts/test_dashboard_races.py.
@@ -115,6 +115,72 @@ class DashboardRaces(unittest.TestCase):
         expect(page.get_by_role("checkbox")).to_be_checked()
         expect(page.get_by_text("first.md", exact=True)).to_have_count(0)
         expect(page.get_by_text("Deleted 1 item(s) successfully.")).to_have_count(0)
+
+
+    def test_delete_requires_correct_owner_for_same_named_repositories(self):
+        page = self.page
+        repos = [
+            {"id": i, "name": "site", "full_name": f"{owner}/site", "default_branch": "main"}
+            for i, owner in enumerate(["personal", "company"], start=1)
+        ]
+        page.route("**/api/bootstrap", lambda route: route.fulfill(json={
+            "user": {"login": "demo", "avatar_url": ""}, "repos": repos, "nextPage": None
+        }))
+        page.route("**/api/repo-tree?*", lambda route: route.fulfill(json={"tree": [], "truncated": False}))
+        requests = []
+
+        def delete_repo(route):
+            requests.append(route.request.post_data_json)
+            route.fulfill(json={"ok": True})
+
+        page.route("**/api/repo", delete_repo)
+        page.goto(ORIGIN)
+        page.get_by_role("button", name="Manage files").click()
+        picker = page.get_by_role("combobox", name="Repository")
+        expect(picker.locator("option[value='personal/site']")).to_have_text("personal/site")
+        expect(picker.locator("option[value='company/site']")).to_have_text("company/site")
+        picker.select_option("company/site")
+        expect(page.get_by_role("heading", name="Files in company/site")).to_be_visible()
+        page.get_by_role("button", name="Delete repository…").click()
+        confirmation = page.get_by_role("textbox", name="Full repository name to confirm deletion")
+        delete = page.get_by_role("button", name="Delete forever")
+        for wrong_name in ["site", "personal/site"]:
+            confirmation.fill(wrong_name)
+            expect(delete).to_be_disabled()
+        confirmation.fill("company/site")
+        expect(delete).to_be_enabled()
+        delete.click()
+        expect(picker.locator("option[value='company/site']")).to_have_count(0)
+        expect(picker.locator("option[value='personal/site']")).to_have_count(1)
+        self.assertEqual([{"owner": "company", "repo": "site"}], requests)
+
+    def test_failed_logout_preserves_dashboard_and_can_retry(self):
+        page = self.page
+
+        for width in [390, 1280]:
+            with self.subTest(width=width):
+                pending = []
+                page.set_viewport_size({"width": width, "height": 844})
+                page.context.add_cookies([{"name": "has_session", "value": "1", "url": ORIGIN}])
+                page.route("**/api/logout", lambda route: pending.append(route))
+                page.goto(ORIGIN)
+                disconnect = page.get_by_role("button", name="Disconnect", exact=False)
+                repo_picker = page.get_by_role("combobox", name="Repository")
+                with page.expect_request("**/api/logout"):
+                    disconnect.click()
+                expect(page.get_by_role("button", name="Disconnecting…")).to_be_disabled()
+                expect(repo_picker).to_be_visible()
+                pending[0].fulfill(status=503, json={"message": "Unavailable"})
+                expect(page.get_by_role("alert")).to_have_text("Couldn’t confirm sign-out. Try again.")
+                expect(repo_picker).to_be_visible()
+                with page.expect_request("**/api/logout"):
+                    page.get_by_role("button", name="Retry disconnect").click()
+                pending[1].fulfill(json={"ok": True}, headers={"set-cookie": "has_session=; Max-Age=0; Path=/"})
+                expect(page.get_by_role("button", name="Connect GitHub")).to_be_visible()
+                page.reload()
+                expect(page.get_by_role("button", name="Connect GitHub")).to_be_visible()
+                expect(repo_picker).to_have_count(0)
+                page.unroute("**/api/logout")
 
 
 if __name__ == "__main__":

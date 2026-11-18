@@ -139,6 +139,8 @@ function SidebarItem({
 
 export default function Dashboard({ account, onDisconnect }: { account: BootstrapData; onDisconnect: () => void }) {
   const { user, repos: firstPage, nextPage } = account;
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [logoutFailed, setLogoutFailed] = useState(false);
   const [repos, setRepos] = useState(firstPage);
   const [nextRepoPage, setNextRepoPage] = useState(nextPage);
   const [isLoadingMoreRepos, setIsLoadingMoreRepos] = useState(false);
@@ -320,12 +322,17 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   };
 
   const logout = async () => {
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+    setLogoutFailed(false);
     try {
       await apiLogout();
-    } catch (err) {
-      console.error(err);
+      onDisconnect();
+    } catch {
+      setLogoutFailed(true);
+    } finally {
+      setIsLoggingOut(false);
     }
-    onDisconnect();
   };
 
   const extractSource = async (
@@ -606,10 +613,14 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
     }
   };
 
+  const canConfirmDeleteRepo = !!selectedRepoFullId
+    && deleteRepoConfirmText === selectedRepoFullId
+    && !isDeletingRepo
+    && !isLoadingMoreRepos;
+
   const handleDeleteRepo = async () => {
-    if (!selectedRepoFullId || repoPageRequest.current) return;
+    if (!canConfirmDeleteRepo || repoPageRequest.current) return;
     const [owner, repo] = selectedRepoFullId.split("/");
-    if (deleteRepoConfirmText !== repo) return;
 
     setIsDeletingRepo(true);
     setDeleteRepoErrorMsg(null);
@@ -638,7 +649,6 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   // Derived state for the three-step push flow
   // ---------------------------------------------------------------------------
   const isDesktop = useMediaQuery("(min-width: 1024px)");
-  const selectedRepoName = selectedRepoFullId ? selectedRepoFullId.split("/")[1] : "";
   const repoReady = !!selectedRepoFullId && !isCreatingRepo;
   const filesReady = !!selectedSource && !isExtracting && extractedFiles.length > 0;
   const stepStatus = (n: 1 | 2): StepStatus => {
@@ -702,7 +712,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   // Repository picker (select + inline "create new"), shared by both views
   // ---------------------------------------------------------------------------
   const repoOptions = useMemo(() => repos.map((repo) => (
-    <option key={repo.id} value={repo.full_name}>{repo.name}</option>
+    <option key={repo.id} value={repo.full_name}>{repo.full_name}</option>
   )), [repos]);
 
   const repoPicker = (
@@ -1038,7 +1048,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
         <>
           <section aria-labelledby="files-title">
             <h2 id="files-title" className={`${T.title} text-slate-900 dark:text-slate-100 mb-3 break-words`}>
-              Files in {selectedRepoName}
+              Files in {selectedRepoFullId}
             </h2>
             <div className="border border-edge rounded-panel p-4 bg-tint-1 transition-colors">
               {isLoadingTree ? (
@@ -1116,7 +1126,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
               {!showDeleteRepoConfirm ? (
                 <>
                   <p className="text-sm text-muted mb-3">
-                    Permanently delete <span className="font-medium text-slate-900 dark:text-slate-100">{selectedRepoName}</span> from GitHub. This can’t be undone.
+                    Permanently delete <span className="font-medium break-all text-slate-900 dark:text-slate-100">{selectedRepoFullId}</span> from GitHub. This can’t be undone.
                   </p>
                   <button
                     type="button"
@@ -1137,15 +1147,15 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
                       instruction: the same warning twice, in the failure colour.
                       Alert error is now only for an actual failure, below.) */}
                   <p id={deleteConfirmHintId} className="text-sm text-muted mb-3">
-                    This permanently deletes the repository and can’t be undone. Type <span className="font-mono text-slate-900 dark:text-slate-100">{selectedRepoName}</span> to confirm.
+                    This permanently deletes the repository and can’t be undone. Type <span className="font-mono break-all text-slate-900 dark:text-slate-100">{selectedRepoFullId}</span> to confirm.
                   </p>
                   <input
                     type="text"
-                    aria-label="Repository name to confirm deletion"
+                    aria-label="Full repository name to confirm deletion"
                     aria-describedby={deleteConfirmHintId}
                     value={deleteRepoConfirmText}
                     onChange={(e) => setDeleteRepoConfirmText(e.target.value)}
-                    placeholder={selectedRepoName}
+                    placeholder={selectedRepoFullId}
                     className={`${FIELD} border border-red-500 dark:border-red-400 font-mono placeholder:text-muted mb-3`}
                     disabled={isDeletingRepo}
                   />
@@ -1162,7 +1172,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
                     <button
                       type="button"
                       onClick={handleDeleteRepo}
-                      disabled={deleteRepoConfirmText !== selectedRepoName || isDeletingRepo || isLoadingMoreRepos}
+                      disabled={!canConfirmDeleteRepo}
                       className={`${BTN} flex-1 text-sm ${
                         isDeletingRepo ? "bg-red-700 text-white cursor-progress" : BTN_DANGER
                       }`}
@@ -1184,6 +1194,28 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   );
 
   const activeView = view === "push" ? pushView : manageView;
+  const logoutLabel = isLoggingOut ? "Disconnecting…" : logoutFailed ? "Retry disconnect" : "Disconnect";
+  const logoutAlert = logoutFailed && (
+    <Alert variant="error" className="mb-3">Couldn’t confirm sign-out. Try again.</Alert>
+  );
+
+  const logoutButton = (
+    <button
+      type="button"
+      onClick={logout}
+      disabled={isLoggingOut}
+      aria-label={isDesktop && !isLoggingOut && !logoutFailed ? "Disconnect GitHub account" : logoutLabel}
+      title={isDesktop ? logoutLabel : undefined}
+      className={`h-11 -mr-3 inline-flex items-center text-muted hover:text-slate-900 dark:hover:text-white transition-colors disabled:opacity-60 ${
+        isDesktop ? "w-11 justify-center hover:bg-tint-3 rounded-control shrink-0" : "px-3 gap-2 text-sm"
+      }`}
+    >
+      {isLoggingOut
+        ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+        : <LogOut aria-hidden="true" className="w-4 h-4" />}
+      {!isDesktop && logoutLabel}
+    </button>
+  );
 
   if (isDesktop) {
     return (
@@ -1200,16 +1232,12 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
 
           <div className="flex-1" />
 
-          <div className="mt-2 pt-3 border-t border-edge-subtle flex items-center gap-3 px-1">
-            {userChip}
-            <button
-              onClick={logout}
-              aria-label="Disconnect GitHub account"
-              title="Disconnect"
-              className="h-11 w-11 -mr-3 inline-flex items-center justify-center text-muted hover:text-slate-700 dark:hover:text-slate-200 hover:bg-tint-3 rounded-control transition-colors shrink-0"
-            >
-              <LogOut className="w-4 h-4" />
-            </button>
+          <div className="mt-2 pt-3 border-t border-edge-subtle">
+            {logoutAlert}
+            <div className="flex items-center gap-3 px-1">
+              {userChip}
+              {logoutButton}
+            </div>
           </div>
         </aside>
 
@@ -1253,15 +1281,12 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
 
         {activeView}
 
-        <div className="mt-8 pt-4 border-t border-edge-subtle flex items-center gap-3">
-          {userChip}
-          <button
-            onClick={logout}
-            className="h-11 px-3 -mr-3 inline-flex items-center gap-2 text-sm text-muted hover:text-slate-900 dark:hover:text-white transition-colors"
-          >
-            <LogOut className="w-4 h-4" />
-            Disconnect
-          </button>
+        <div className="mt-8 pt-4 border-t border-edge-subtle">
+          {logoutAlert}
+          <div className="flex items-center gap-3">
+            {userChip}
+            {logoutButton}
+          </div>
         </div>
       </div>
     </div>
