@@ -1,0 +1,121 @@
+"""Production browser regressions for dashboard selections.
+
+Start the app with npm run build && NODE_ENV=production npm start.
+With Python Playwright and Chromium installed, run python scripts/test_dashboard_races.py.
+Set CHROMIUM_PATH to use a system Chromium. GitHub requests are mocked.
+"""
+
+import gzip
+import io
+import json
+import os
+import unittest
+import zipfile
+from urllib.parse import parse_qs, urlsplit
+
+from playwright.sync_api import expect, sync_playwright
+
+
+ORIGIN = "http://localhost:3000"
+
+
+def archive(name):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zipped:
+        zipped.writestr(f"{name}.txt", name)
+    return {"name": f"{name}.zip", "mimeType": "application/zip", "buffer": buffer.getvalue()}
+
+
+class DashboardRaces(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.playwright = sync_playwright().start()
+        cls.addClassCleanup(cls.playwright.stop)
+        cls.browser = cls.playwright.chromium.launch(executable_path=os.getenv("CHROMIUM_PATH"))
+        cls.addClassCleanup(cls.browser.close)
+
+    def setUp(self):
+        context = self.browser.new_context(viewport={"width": 390, "height": 844})
+        self.addCleanup(context.close)
+        context.add_cookies([{"name": "has_session", "value": "1", "url": ORIGIN}])
+        self.page = context.new_page()
+        self.page.route("**/api/**", lambda route: route.abort())
+        repos = [
+            {"id": i, "name": name, "full_name": f"demo/{name}", "default_branch": "main"}
+            for i, name in enumerate(["first", "second"], start=1)
+        ]
+        self.page.route("**/api/bootstrap", lambda route: route.fulfill(json={
+            "user": {"login": "demo", "avatar_url": ""}, "repos": repos, "nextPage": None
+        }))
+
+    def test_replaced_zip_cannot_supply_commit_contents(self):
+        page = self.page
+        # Hold the first job before its real worker receives it. Await its final
+        # message so the stale job has actually finished when we click Push.
+        page.add_init_script("""
+            const post = Worker.prototype.postMessage;
+            Worker.prototype.postMessage = function(message, ...rest) {
+                if (message.file?.name !== "first.zip") return post.call(this, message, ...rest);
+                window.finishFirst = () => new Promise(resolve => {
+                    this.addEventListener("message", event => {
+                        if (event.data.type === "done") requestAnimationFrame(() => requestAnimationFrame(resolve));
+                    });
+                    post.call(this, message, ...rest);
+                });
+            };
+        """)
+        commits = []
+
+        def record_commit(route):
+            raw = route.request.post_data_buffer
+            if route.request.headers.get("content-encoding") == "gzip":
+                raw = gzip.decompress(raw)
+            commits.append(json.loads(raw))
+            route.fulfill(json={"commit": {"sha": "a" * 40}})
+
+        page.route("**/api/upload/commit", record_commit)
+        page.goto(ORIGIN)
+        picker = page.locator("input[type=file][accept]")
+        picker.set_input_files(archive("first"))
+        page.wait_for_function("typeof window.finishFirst === 'function'")
+        page.get_by_role("button", name="Remove selected files").click()
+        picker.set_input_files(archive("second"))
+        push = page.get_by_role("button", name="Push files", exact=True).last
+        expect(push).to_be_enabled()
+        page.evaluate("window.finishFirst()")
+        expect(page.get_by_text("second.zip", exact=True)).to_be_visible()
+        push.click()
+        expect(page.get_by_role("button", name="Push more files")).to_be_visible()
+        self.assertEqual([["second.txt"]], [[e["path"] for e in c["entries"]] for c in commits])
+
+    def test_delete_completion_keeps_new_repository_tree_and_selection(self):
+        page = self.page
+        pending = []
+
+        def tree(route):
+            repo = parse_qs(urlsplit(route.request.url).query)["repo"][0]
+            route.fulfill(json={"tree": [{"type": "blob", "path": f"{repo}.md", "sha": "b" * 40}],
+                                "truncated": False})
+
+        page.route("**/api/repo-tree?*", tree)
+        page.route("**/api/delete-paths", lambda route: pending.append(route))
+        page.goto(ORIGIN)
+        page.get_by_role("button", name="Manage files").click()
+        page.get_by_text("first.md", exact=True).click()
+        delete = page.get_by_role("button", name="Delete 1 selected")
+        with page.expect_request("**/api/delete-paths"):
+            delete.click()
+        page.get_by_role("combobox", name="Repository").select_option("demo/second")
+        page.get_by_text("second.md", exact=True).click()
+        self.assertEqual("first", pending[0].request.post_data_json["repo"])
+        pending[0].fulfill(content_type="application/x-ndjson", body='{"done":true,"commit":{}}\n')
+        # Re-enabling this selection means the pending deletion has settled.
+        expect(delete).to_be_enabled()
+        expect(page.get_by_text("second.md", exact=True)).to_be_visible()
+        expect(page.get_by_role("checkbox")).to_be_checked()
+        expect(page.get_by_text("first.md", exact=True)).to_have_count(0)
+        expect(page.get_by_text("Deleted 1 item(s) successfully.")).to_have_count(0)
+
+
+if __name__ == "__main__":
+    unittest.main()
