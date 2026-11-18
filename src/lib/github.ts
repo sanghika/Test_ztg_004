@@ -374,12 +374,12 @@ export const fetchBootstrap = async (): Promise<BootstrapData> => {
 };
 
 // One further page of the repository list (page 1 comes with fetchBootstrap).
-export const fetchRepositories = async (page: number): Promise<{ repos: RepoSummary[]; nextPage: number | null }> => {
-  const res = await apiFetch(`/api/repos?page=${page}`);
+export const fetchRepositories = async (page: number, signal?: AbortSignal): Promise<{ repos: RepoSummary[]; nextPage: number | null }> => {
+  const res = await apiFetch(`/api/repos?page=${page}`, { signal });
   return res.json();
 };
 
-export const createRepository = async (name: string, isPrivate: boolean) => {
+export const createRepository = async (name: string, isPrivate: boolean): Promise<RepoSummary> => {
   const res = await apiFetch("/api/repos", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
