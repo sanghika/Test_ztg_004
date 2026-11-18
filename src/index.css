@@ -2,38 +2,20 @@
 
 /* ==========================================================================
    Fonts (self-hosted, no third-party requests)
-   Files live in public/fonts and are Latin subsets in woff2 (about 21 KB per
-   Inter weight, 20 KB for the mono), so nothing blocks rendering on another
-   origin. index.html preloads the three Inter weights; server.ts caches
-   /fonts for a year, so a changed font MUST get a new file name (bump the
-   version in it). Licences: Inter-OFL.txt and JetBrainsMono-OFL.txt, same folder.
+   index.html preloads one Latin WOFF2 subset of Inter 4.0 from the upstream
+   InterVariable.ttf release, with optical size fixed at 14 to match the
+   original static faces and the weight axis restricted to 400–600.
+   server.ts caches /fonts for a year, so assign a new filename when a font
+   changes. Licences: Inter-OFL.txt and JetBrainsMono-OFL.txt in public/fonts.
    font-display: swap shows text straight away in the fallback face below and
    swaps once Inter arrives.
    ========================================================================== */
 @font-face {
   font-family: "Inter";
   font-style: normal;
-  font-weight: 400;
+  font-weight: 400 600;
   font-display: swap;
-  src: url("/fonts/inter-4.0-latin-400.woff2") format("woff2");
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
-@font-face {
-  font-family: "Inter";
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-  src: url("/fonts/inter-4.0-latin-500.woff2") format("woff2");
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
-@font-face {
-  font-family: "Inter";
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url("/fonts/inter-4.0-latin-600.woff2") format("woff2");
+  src: url("/fonts/inter-4.0-latin-variable-400-600.woff2") format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
@@ -106,13 +88,12 @@
            size-adjusted Arial that shows while Inter loads; the rest of the
            stack is only for glyphs Inter lacks and for if the font fails.
      mono  JetBrains Mono, 400 only. Mono is for text where each character has
-           to be read exactly: the repo-name inputs, the file names in the file
-           tree, the "type X to confirm" name and the demo terminal. It is NOT
-           used in headings, the breadcrumb or running prose: at the same px
-           size it is wider and looks heavier than Inter.                       */
+           to be read exactly, such as repository names and file paths.
+           The demo terminal uses the system monospace stack.                   */
   --font-sans: "Inter", "Inter Fallback", ui-sans-serif, system-ui, -apple-system,
     "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-system-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-mono: "JetBrains Mono", var(--font-system-mono);
 
   /* ---- Type scale (4 steps) -------------------------------------------------
      SIZE (what each step is for)
@@ -496,9 +477,19 @@
 /* Returning visitor on "/" (see the has_session script in index.html).
    The prerendered HTML always contains the signed-out hero. For someone whose
    has_session flag is set, index.html adds .session-pending to <html>: the hero
-   is hidden (visibility keeps its space, so nothing shifts) and a CSS spinner
-   sits in the card until React takes over, which removes the class in the same
-   frame it renders its own spinner or the dashboard. */
+   is hidden and a CSS spinner sits in the card until React takes over.
+   Both loading states reserve the typical initial dashboard height so the
+   footer stays near its final position while bootstrap is in flight. */
+html.session-pending [data-auth-card],
+[data-auth-loading] {
+  min-block-size: 48rem;
+}
+@media (min-width: 64rem) {
+  html.session-pending [data-auth-card],
+  [data-auth-loading] {
+    min-block-size: 45rem;
+  }
+}
 html.session-pending [data-signed-out] {
   visibility: hidden;
 }
