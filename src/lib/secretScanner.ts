@@ -1,6 +1,6 @@
 import type { ExtractedFile } from "./github";
 import { estimateBytesFromBase64 } from "./uploadLimits";
-import { isBinaryPath, isExcludedPath, scanContent, type ScanOutcome } from "./secretScannerCore";
+import { isBinaryPath, isExcludedPath, MAX_SCAN_BYTES, scanContent, type ScanOutcome } from "./secretScannerCore";
 import { runWorkerJob, takeWorker, workersSupported } from "./workerJob";
 
 export interface SanitizeReport {
@@ -69,14 +69,19 @@ export const sanitizeFiles = async (
 ): Promise<{ sanitized: ExtractedFile[]; report: SanitizeReport }> => {
   const report: SanitizeReport = { skippedFiles: [], redactedFiles: [], unscannedFiles: [] };
 
-  // Cheap, path-only decisions first, so excluded and binary files are never
-  // copied to a worker or decoded.
+  // Check paths and sizes before copying content to a worker.
+  const tooLarge = new Set<number>();
   const candidates: { index: number; content: string }[] = [];
   let candidateBytes = 0;
   files.forEach((file, index) => {
     if (isExcludedPath(file.path) || isBinaryPath(file.path)) return;
+    const bytes = estimateBytesFromBase64(file.content);
+    if (bytes > MAX_SCAN_BYTES) {
+      tooLarge.add(index);
+      return;
+    }
     candidates.push({ index, content: file.content });
-    candidateBytes += estimateBytesFromBase64(file.content);
+    candidateBytes += bytes;
   });
 
   let findings: Map<number, Finding>;
@@ -105,7 +110,7 @@ export const sanitizeFiles = async (
       sanitized.push({ path: file.path, content: finding.content });
       return;
     }
-    if (finding?.kind === "too-large") report.unscannedFiles.push(file.path);
+    if (tooLarge.has(index) || finding?.kind === "too-large") report.unscannedFiles.push(file.path);
     sanitized.push(file);
   });
 

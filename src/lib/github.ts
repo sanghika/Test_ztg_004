@@ -1,6 +1,7 @@
 import { estimateBytesFromBase64, MAX_TOTAL_UPLOAD_BYTES, MAX_SINGLE_FILE_BYTES } from "./uploadLimits";
 import { extractZipEntries } from "./zipExtract";
 import { prewarmWorker, runWorkerJob, takeWorker, workersSupported, WorkerUnavailableError } from "./workerJob";
+import { encodeUploadBody, type PreparedUploadBody } from "./uploadBody";
 
 export interface ExtractedFile {
   path: string;
@@ -469,7 +470,7 @@ const MAX_INLINE_TOTAL_BYTES = 2 * 1024 * 1024;
 // content given". `ignoreBOM: true` keeps a leading byte-order mark in the text
 // instead of silently dropping it.
 const inlineTextOf = (base64: string): string | null => {
-  if (base64.length === 0 || estimateBytesFromBase64(base64) > MAX_INLINE_FILE_BYTES) return null;
+  if (base64.length === 0) return null;
   try {
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
@@ -492,9 +493,10 @@ export const splitInlineText = (
   const blobFiles: ExtractedFile[] = [];
   let inlineBytes = 0;
   for (const file of files) {
-    const text = inlineTextOf(file.content);
-    const bytes = text === null ? 0 : estimateBytesFromBase64(file.content);
-    if (text !== null && inlineBytes + bytes <= MAX_INLINE_TOTAL_BYTES) {
+    const bytes = estimateBytesFromBase64(file.content);
+    const fits = bytes <= MAX_INLINE_FILE_BYTES && inlineBytes + bytes <= MAX_INLINE_TOTAL_BYTES;
+    const text = fits ? inlineTextOf(file.content) : null;
+    if (text !== null) {
       inline.push({ path: file.path, content: text });
       inlineBytes += bytes;
     } else {
@@ -504,19 +506,29 @@ export const splitInlineText = (
   return { inline, blobFiles };
 };
 
-// base64 is 6 bits of information per 8-bit character, so gzip wins back
-// nearly all of its 33% overhead even for files that are already compressed.
-// CompressionStream is in current Chrome, Edge, Safari and Firefox; where it is
-// missing, or fails, the body goes out uncompressed.
-const gzipJson = async (json: string): Promise<Blob | null> => {
-  try {
-    if (typeof CompressionStream === "undefined" || typeof Blob === "undefined") return null;
-    const stream = new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"));
-    return await new Response(stream).blob();
-  } catch {
-    return null;
+type UploadEntry = { path: string; sha: string } | { path: string; content: string };
+type UploadBody = { owner: string; repo: string } &
+  ({ files: ExtractedFile[] } | { entries: UploadEntry[]; commitMessage: string });
+
+const WORKER_UPLOAD_CHARS = 1024 * 1024;
+
+async function prepareUploadBody(body: UploadBody): Promise<PreparedUploadBody> {
+  const entries = "files" in body ? body.files : body.entries;
+  // A size estimate avoids serializing solely to decide where to serialize.
+  const chars = entries.reduce(
+    (sum, entry) => sum + entry.path.length + ("content" in entry ? entry.content.length : entry.sha.length),
+    "commitMessage" in body ? body.commitMessage.length : 0
+  );
+  if (chars >= WORKER_UPLOAD_CHARS && workersSupported()) {
+    try {
+      const worker = new Worker(new URL("./workers/uploadBody.worker.ts", import.meta.url), { type: "module" });
+      return await runWorkerJob<PreparedUploadBody>(worker, body);
+    } catch {
+      // Preparing the body has no network side effects, so it can be repeated.
+    }
   }
-};
+  return encodeUploadBody(body);
+}
 
 // Network drops and gateway errors are worth another try for the requests that
 // are safe to repeat: blobs are content-addressed, so sending a batch again
@@ -525,17 +537,10 @@ const gzipJson = async (json: string): Promise<Blob | null> => {
 const isTransientFailure = (err: unknown): boolean =>
   err instanceof ApiError ? [502, 503, 504].includes(err.status) : err instanceof TypeError;
 
-async function postJson<T>(path: string, body: unknown, { gzip = false, retry = false } = {}): Promise<T> {
-  const json = JSON.stringify(body);
+async function postUpload<T>(path: string, body: UploadBody, { retry = false } = {}): Promise<T> {
+  const { payload, contentEncoding } = await prepareUploadBody(body);
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  let payload: BodyInit = json;
-  if (gzip) {
-    const compressed = await gzipJson(json);
-    if (compressed) {
-      payload = compressed;
-      headers["Content-Encoding"] = "gzip";
-    }
-  }
+  if (contentEncoding) headers["Content-Encoding"] = contentEncoding;
 
   const MAX_ATTEMPTS = retry ? 3 : 1;
   for (let attempt = 1; ; attempt++) {
@@ -560,16 +565,16 @@ export const uploadToGitHub = async (
 
   // Steps: one per file that goes up as a blob, then the commit and its finish.
   const total = blobFiles.length + 2;
-  const entries: ({ path: string; sha: string } | { path: string; content: string })[] = [...inline];
+  const entries: UploadEntry[] = [...inline];
 
   const uploadingMessage = (done: number) => `Uploading files (${done}/${blobFiles.length})...`;
   let uploaded = 0;
   if (blobFiles.length > 0) onProgress(uploadingMessage(0), 0, total);
   for (const batch of planUploadBatches(blobFiles)) {
-    const result = await postJson<{ blobs: { path: string; sha: string }[] }>(
+    const result = await postUpload<{ blobs: { path: string; sha: string }[] }>(
       "/api/upload/blobs",
       { owner, repo, files: batch },
-      { gzip: true, retry: true }
+      { retry: true }
     );
     if (!Array.isArray(result.blobs) || result.blobs.length !== batch.length) {
       throw new Error("The server did not confirm every file in this upload. Please try again.");
@@ -580,10 +585,9 @@ export const uploadToGitHub = async (
   }
 
   onProgress("Committing changes...", blobFiles.length + 1, total);
-  const { commit } = await postJson<{ commit: any }>(
+  const { commit } = await postUpload<{ commit: any }>(
     "/api/upload/commit",
-    { owner, repo, entries, commitMessage },
-    { gzip: true }
+    { owner, repo, entries, commitMessage }
   );
   onProgress("Finalizing...", total, total);
   return commit;
