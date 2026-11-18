@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useId, lazy, Suspense } from "react";
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useId, lazy, Suspense } from "react";
 import { fetchRepositories, type BootstrapData, type RepoSummary, warmZipExtractor, extractZip, extractFolder, filesFromDataTransferItems, uploadToGitHub, ExtractedFile, fetchRepoTree, deleteRepoPaths, deleteRepository, createRepository, logout as apiLogout, RepoTreeEntry } from "./lib/github";
 import { trackEvent } from "./lib/analytics";
 import { mergeRepos } from "./lib/repos";
@@ -12,6 +12,8 @@ export { fetchBootstrap } from "./lib/github";
 const loadSecretScanner = () => import("./lib/secretScanner");
 const loadRepoFileTree = () => import("./components/RepoFileTree");
 const RepoFileTree = lazy(loadRepoFileTree);
+
+type UploadSource = { kind: "zip" | "folder"; name: string };
 
 // Sentinel value for the "Create new repository" option in the repo <select>.
 // Never a real full_name, so it can't collide with an actual repo.
@@ -161,7 +163,8 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
 
   // Tracks whichever source is currently loaded — a ZIP file or a picked/dropped
   // folder — since both feed the same extractedFiles pipeline below.
-  const [selectedSource, setSelectedSource] = useState<{ kind: "zip" | "folder"; name: string } | null>(null);
+  const [selectedSource, setSelectedSource] = useState<UploadSource | null>(null);
+  const sourceVersion = useRef(0);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [extractedFiles, setExtractedFiles] = useState<ExtractedFile[]>([]);
   const [isExtracting, setIsExtracting] = useState(false);
@@ -192,7 +195,8 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   const [isLoadingTree, setIsLoadingTree] = useState(false);
   const [treeErrorMsg, setTreeErrorMsg] = useState<string | null>(null);
   const [selectedDeletePaths, setSelectedDeletePaths] = useState<Set<string>>(new Set());
-  const [isDeleting, setIsDeleting] = useState(false);
+  const [deletingFrom, setDeletingFrom] = useState<string | null>(null);
+  const isDeleting = deletingFrom !== null;
   const [deleteStatusMsg, setDeleteStatusMsg] = useState("");
   const [deleteSuccessMsg, setDeleteSuccessMsg] = useState<string | null>(null);
 
@@ -238,6 +242,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   };
 
   useEffect(() => () => {
+    sourceVersion.current++;
     repoPageRequest.current?.abort();
     repoPageRequest.current = null;
   }, []);
@@ -323,17 +328,38 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
     onDisconnect();
   };
 
-  // Intermediate filenames are visual feedback. The result array supplies the
-  // exact count when extraction completes, even for a very fast extraction.
-  const startExtractionProgress = () => {
+  const extractSource = async (
+    source: UploadSource,
+    read: (onProgress: (path: string) => void) => Promise<ExtractedFile[]>
+  ) => {
+    const version = ++sourceVersion.current;
+    setSelectedSource(source);
+    setExtractedFiles([]);
+    setErrorMsg(null);
+    clearPushResult();
+    setIsReadingFolder(false);
+    setIsExtracting(true);
     setExtractingName("");
+
     let nextUpdate = 0;
-    return (path: string) => {
+    const onProgress = (path: string) => {
       const now = performance.now();
-      if (now < nextUpdate) return;
+      if (sourceVersion.current !== version || now < nextUpdate) return;
       setExtractingName(path);
       nextUpdate = now + 100;
     };
+    try {
+      const files = await read(onProgress);
+      if (sourceVersion.current === version) setExtractedFiles(files);
+    } catch (err) {
+      if (sourceVersion.current !== version) return;
+      console.error(err);
+      const fallback = source.kind === "zip" ? "Failed to extract ZIP." : "Failed to read the selected folder.";
+      setErrorMsg(err instanceof Error && err.message ? err.message : fallback);
+      setSelectedSource(null);
+    } finally {
+      if (sourceVersion.current === version) setIsExtracting(false);
+    }
   };
 
   const processFile = async (file: File | undefined) => {
@@ -342,44 +368,14 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
       setErrorMsg("Please select a valid ZIP file.");
       return;
     }
-    setErrorMsg(null);
-    setSelectedSource({ kind: "zip", name: file.name });
-    clearPushResult();
     trackEvent("zip_uploaded", { size_bytes: file.size, file_name: file.name });
-
-    setIsExtracting(true);
-    try {
-      const files = await extractZip(file, startExtractionProgress());
-      setExtractedFiles(files);
-    } catch (err: any) {
-      console.error(err);
-      setErrorMsg(err?.message || "Failed to extract ZIP.");
-      setExtractedFiles([]);
-      setSelectedSource(null);
-    } finally {
-      setIsExtracting(false);
-    }
+    await extractSource({ kind: "zip", name: file.name }, (progress) => extractZip(file, progress));
   };
 
   const processFolder = async (files: File[], folderName: string) => {
-    if (!files || files.length === 0) return;
-    setErrorMsg(null);
-    setSelectedSource({ kind: "folder", name: folderName });
-    clearPushResult();
+    if (!files.length) return;
     trackEvent("folder_uploaded", { file_count: files.length, folder_name: folderName });
-
-    setIsExtracting(true);
-    try {
-      const extracted = await extractFolder(files, startExtractionProgress());
-      setExtractedFiles(extracted);
-    } catch (err: any) {
-      console.error(err);
-      setErrorMsg(err?.message || "Failed to read the selected folder.");
-      setExtractedFiles([]);
-      setSelectedSource(null);
-    } finally {
-      setIsExtracting(false);
-    }
+    await extractSource({ kind: "folder", name: folderName }, (progress) => extractFolder(files, progress));
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -431,12 +427,13 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
       // Walking a folder's entries can take a moment before extraction even
       // starts (nothing was visibly "loading" here before, which made it
       // look like the drop had silently failed) — show feedback immediately.
+      const version = ++sourceVersion.current;
       setIsReadingFolder(true);
       try {
         const files = await filesFromDataTransferItems(e.dataTransfer.items);
-        await processFolder(files, entry.name);
+        if (sourceVersion.current === version) await processFolder(files, entry.name);
       } finally {
-        setIsReadingFolder(false);
+        if (sourceVersion.current === version) setIsReadingFolder(false);
       }
       return;
     }
@@ -533,6 +530,14 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   };
 
   // --- Manage (delete) existing repo files/folders --- //
+  const managedRepo = view === "manage" && !isCreatingRepo ? selectedRepoFullId : "";
+  const managedRepoRef = useRef("");
+  useLayoutEffect(() => {
+    managedRepoRef.current = managedRepo;
+    setDeleteSuccessMsg(null);
+    return () => { managedRepoRef.current = ""; };
+  }, [managedRepo]);
+
   // The tree loads whenever the manage view is open for a repo (and again on
   // "Try again"). The cancelled flag drops a stale response if the repo or view
   // changes mid-request.
@@ -541,7 +546,6 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
     let cancelled = false;
     setIsLoadingTree(true);
     setTreeErrorMsg(null);
-    setDeleteSuccessMsg(null);
     setSelectedDeletePaths(new Set());
     setShowDeleteRepoConfirm(false);
     setDeleteRepoConfirmText("");
@@ -567,11 +571,11 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   }, [view, selectedRepoFullId, isCreatingRepo, treeReloadKey]);
 
   const handleDeleteSelected = async () => {
-    if (!selectedRepoFullId || selectedDeletePaths.size === 0) return;
+    if (isDeleting || !selectedRepoFullId || selectedDeletePaths.size === 0) return;
     const [owner, repo] = selectedRepoFullId.split("/");
     const pathsArray: string[] = Array.from(selectedDeletePaths);
 
-    setIsDeleting(true);
+    setDeletingFrom(selectedRepoFullId);
     setTreeErrorMsg(null);
     setDeleteSuccessMsg(null);
     try {
@@ -582,19 +586,22 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
         `Delete ${pathsArray.length} item(s) via ZiptoGit`,
         (status) => setDeleteStatusMsg(status)
       );
-      setDeleteSuccessMsg(`Deleted ${pathsArray.length} item(s) successfully.`);
       trackEvent("repo_files_deleted", { count: pathsArray.length });
-      // Refresh the tree so the UI reflects the new state.
-      const { tree, truncated } = await fetchRepoTree(owner, repo, defaultBranchOf(selectedRepoFullId));
-      setRepoTree(tree);
-      setTreeTruncated(!!truncated);
-      setSelectedDeletePaths(new Set());
+      if (managedRepoRef.current === selectedRepoFullId) {
+        setDeleteSuccessMsg(`Deleted ${pathsArray.length} item(s) successfully.`);
+        setSelectedDeletePaths(new Set());
+        setIsLoadingTree(true);
+        // Let the tree effect own the refresh, including cancellation on navigation.
+        setTreeReloadKey((key) => key + 1);
+      }
     } catch (err: any) {
       console.error("Delete error details:", err);
-      setTreeErrorMsg(err.message || "Failed to delete selected items.");
+      if (managedRepoRef.current === selectedRepoFullId) {
+        setTreeErrorMsg(err.message || "Failed to delete selected items.");
+      }
       trackEvent("repo_files_delete_failed", { error: err.message });
     } finally {
-      setIsDeleting(false);
+      setDeletingFrom(null);
       setDeleteStatusMsg("");
     }
   };
@@ -661,7 +668,10 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
                 ? "No files found. Remove this and add a different ZIP or folder."
                 : null;
 
-  const pushMore = () => {
+  const clearSource = () => {
+    sourceVersion.current++;
+    setIsExtracting(false);
+    setIsReadingFolder(false);
     clearPushResult();
     setSelectedSource(null);
     setExtractedFiles([]);
@@ -891,11 +901,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
         type="button"
         aria-label="Remove selected files"
         disabled={isUploading}
-        onClick={() => {
-          setSelectedSource(null);
-          setExtractedFiles([]);
-          clearPushResult();
-        }}
+        onClick={clearSource}
         className="h-11 w-11 -mr-3 inline-flex items-center justify-center text-muted hover:text-slate-700 dark:hover:text-slate-200 hover:bg-tint-2 rounded-control transition-colors shrink-0 disabled:opacity-50"
       >
         <X className="w-4 h-4" />
@@ -939,7 +945,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
             View commit <ExternalLink className="w-4 h-4" />
           </a>
         )}
-        <button type="button" onClick={pushMore} className={`${BTN} ${BTN_SECONDARY} text-sm`}>
+        <button type="button" onClick={clearSource} className={`${BTN} ${BTN_SECONDARY} text-sm`}>
           Push more files
         </button>
       </div>
@@ -1088,7 +1094,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
                   >
                     {isDeleting ? (
                       <>
-                        <Loader2 className="w-4 h-4 animate-spin" /> {deleteStatusMsg || "Deleting…"}
+                        <Loader2 className="w-4 h-4 animate-spin" /> {deletingFrom === selectedRepoFullId ? deleteStatusMsg || "Deleting…" : `Finishing deletion in ${deletingFrom}…`}
                       </>
                     ) : (
                       <>
