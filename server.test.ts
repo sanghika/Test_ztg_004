@@ -275,12 +275,15 @@ describe("request body limits", () => {
       repo: "y",
       files: [{ path: "../evil.txt", content: oversizedForDefault }],
     });
-    const res = await request(app)
+    const compressedRequest = request(app)
       .post("/api/upload/blobs")
       .set("Cookie", session())
       .set("Content-Type", "application/json")
-      .set("Content-Encoding", "gzip")
-      .send(zlib.gzipSync(payload));
+      .set("Content-Encoding", "gzip");
+    // Write the gzip bytes directly. Superagent's JSON serializer would
+    // otherwise turn the Buffer into an object before sending it.
+    compressedRequest.write(zlib.gzipSync(payload));
+    const res = await compressedRequest;
     // Reaching the route's own validation means the body was inflated and parsed.
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/paths are invalid/i);

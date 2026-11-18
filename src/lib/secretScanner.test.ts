@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { sanitizeFiles } from "./secretScanner";
 import { MAX_SCAN_BYTES, scanContent } from "./secretScannerCore";
 import type { ExtractedFile } from "./github";
@@ -135,12 +135,19 @@ describe("sanitizeFiles - what is and is not scanned", () => {
     }
   });
 
-  it("leaves a file over the size cap untouched and lists it as unscanned", async () => {
+  it("reports a file over the size cap without sending it to a worker", async () => {
     const file = makeFile("huge.txt", "a".repeat(MAX_SCAN_BYTES + 1));
-    const { sanitized, report } = await sanitizeFiles([file]);
-    expect(report.unscannedFiles).toEqual(["huge.txt"]);
-    expect(report.redactedFiles.length).toBe(0);
-    expect(sanitized[0].content).toBe(file.content);
+    const startWorker = vi.fn();
+    vi.stubGlobal("Worker", startWorker);
+    try {
+      const { sanitized, report } = await sanitizeFiles([file]);
+      expect(startWorker).not.toHaveBeenCalled();
+      expect(report.unscannedFiles).toEqual(["huge.txt"]);
+      expect(report.redactedFiles.length).toBe(0);
+      expect(sanitized[0].content).toBe(file.content);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("redacts the same kind of secret in every file (the shared regexes carry no state between files)", async () => {

@@ -112,7 +112,7 @@ const readBody = async (init: RequestInit): Promise<any> => {
     const bytes = Buffer.from(await (init.body as Blob).arrayBuffer());
     return JSON.parse(zlib.gunzipSync(bytes).toString("utf-8"));
   }
-  return JSON.parse(init.body as string);
+  return JSON.parse(init.body instanceof Blob ? await init.body.text() : (init.body as string));
 };
 
 const installFakeServer = (handler?: (call: Call, attempt: number) => Response | undefined) => {
@@ -196,6 +196,18 @@ describe("uploadToGitHub (batched)", () => {
 
     expect(calls[0].headers["Content-Encoding"]).toBe("gzip"); // blobs
     expect(calls[1].headers["Content-Encoding"]).toBe("gzip"); // commit
+  });
+
+  it("sends the same JSON when browser gzip is unavailable", async () => {
+    vi.stubGlobal("CompressionStream", undefined);
+    const calls = installFakeServer();
+    const files = [binFile("a.bin", 1000)];
+    await uploadToGitHub("o", "r", files, "msg", vi.fn());
+
+    expect(calls[0].headers["Content-Encoding"]).toBeUndefined();
+    expect(calls[0].body).toEqual({ owner: "o", repo: "r", files });
+    expect(calls[1].headers["Content-Encoding"]).toBeUndefined();
+    expect(calls[1].body.entries).toEqual([{ path: "a.bin", sha: sha("a.bin".length) }]);
   });
 
   it("reports progress from 0 to total/total, never going backwards", async () => {
