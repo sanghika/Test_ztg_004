@@ -8,13 +8,7 @@ import { LogOut, Upload, Loader2, CheckCircle, AlertCircle, FileArchive, X, Chec
 
 export { fetchBootstrap } from "./lib/github";
 
-// Code that is only needed after the visitor does something is loaded on
-// demand, so it is not part of the first download:
-//  - jszip (see extractZip in lib/github.ts): after a ZIP is picked
-//  - the secret scanner: when "Push" is pressed
-//  - the repository file tree: in the Manage files view
-// Each loader is also called early (idle time once signed in, or in parallel
-// with the tree request) so the chunk is usually already cached when needed.
+// Load the scanner on Push and the file tree when Manage files opens.
 const loadSecretScanner = () => import("./lib/secretScanner");
 const loadRepoFileTree = () => import("./components/RepoFileTree");
 const RepoFileTree = lazy(loadRepoFileTree);
@@ -394,7 +388,13 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
 
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
-    if (!isDraggingFile) setIsDraggingFile(true);
+    if (isDraggingFile) return;
+    setIsDraggingFile(true);
+    // Some browsers expose only the MIME type until drop. An untyped ZIP
+    // still starts extraction normally once the file is available.
+    if (Array.from(e.dataTransfer.items).some(item =>
+      item.kind === "file" && (item.type === "application/zip" || item.type === "application/x-zip-compressed")
+    )) warmZipExtractor();
   };
 
   const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
@@ -518,23 +518,6 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
       setIsUploading(false);
     }
   };
-
-  // Once signed in, the visitor is about to pick a ZIP and push it. Fetch the
-  // two chunks that step needs (JSZip, the secret scanner) when the browser is
-  // idle, so the first extraction does not wait on a download. Signed-out
-  // visitors never need them and do not pay for them.
-  useEffect(() => {
-    const warm = () => {
-      warmZipExtractor();
-      loadSecretScanner().catch(() => {});
-    };
-    if (typeof window.requestIdleCallback === "function") {
-      const id = window.requestIdleCallback(warm, { timeout: 5000 });
-      return () => window.cancelIdleCallback(id);
-    }
-    const id = window.setTimeout(warm, 2000);
-    return () => window.clearTimeout(id);
-  }, []);
 
   // --- Manage (delete) existing repo files/folders --- //
   // The tree loads whenever the manage view is open for a repo (and again on
@@ -809,7 +792,12 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   // ---------------------------------------------------------------------------
   const dropZone = (
     <div
-      onClick={() => !isReadingFolder && fileInputRef.current?.click()}
+      onClick={(event) => {
+        // A programmatic click on either hidden file input bubbles here too.
+        if (isReadingFolder || event.target instanceof HTMLInputElement) return;
+        warmZipExtractor();
+        fileInputRef.current?.click();
+      }}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}

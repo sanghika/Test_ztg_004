@@ -63,8 +63,8 @@ export function runWorkerJob<T>(
 
 // --- Optional pre-spawned worker ------------------------------------------ //
 // Starting a worker means downloading and evaluating its script (for the ZIP
-// worker that includes JSZip). prewarmWorker does that ahead of time, once the
-// visitor is signed in, and takeWorker hands the ready worker to the first job.
+// worker that includes JSZip). prewarmWorker does that when the visitor opens the
+// ZIP picker or drags a ZIP over the drop zone, and takeWorker hands the ready worker to the first job.
 const warmed = new Map<string, { worker: Worker; timer: ReturnType<typeof setTimeout> }>();
 const WARM_WORKER_TTL_MS = 2 * 60 * 1000;
 
