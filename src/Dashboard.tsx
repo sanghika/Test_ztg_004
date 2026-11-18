@@ -323,6 +323,19 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
     onDisconnect();
   };
 
+  // Intermediate filenames are visual feedback. The result array supplies the
+  // exact count when extraction completes, even for a very fast extraction.
+  const startExtractionProgress = () => {
+    setExtractingName("");
+    let nextUpdate = 0;
+    return (path: string) => {
+      const now = performance.now();
+      if (now < nextUpdate) return;
+      setExtractingName(path);
+      nextUpdate = now + 100;
+    };
+  };
+
   const processFile = async (file: File | undefined) => {
     if (!file) return;
     if (file.type !== "application/zip" && !file.name.endsWith(".zip")) {
@@ -336,7 +349,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
 
     setIsExtracting(true);
     try {
-      const files = await extractZip(file, (fname) => setExtractingName(fname));
+      const files = await extractZip(file, startExtractionProgress());
       setExtractedFiles(files);
     } catch (err: any) {
       console.error(err);
@@ -357,7 +370,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
 
     setIsExtracting(true);
     try {
-      const extracted = await extractFolder(files, (fname) => setExtractingName(fname));
+      const extracted = await extractFolder(files, startExtractionProgress());
       setExtractedFiles(extracted);
     } catch (err: any) {
       console.error(err);

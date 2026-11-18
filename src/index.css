@@ -389,7 +389,7 @@
 }
 
 /* Signature desktop-showcase terminal (ZipToGitTerminal in App.tsx) — a
-   looping staged sequence: file chips fade/slide in as they "extract", the
+   one-pass sequence: file chips fade/slide in as they "extract", the
    commit graph node pops in once committed, log lines step in, the cursor
    blinks, and the active stage dot pulses. Applied via inline `style=
    {{ animation: ... }}` per-element rather than utility classes, since each

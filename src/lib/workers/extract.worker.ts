@@ -1,9 +1,9 @@
 // Reads a ZIP off the main thread: JSZip's parsing and base64 encoding of every
 // entry are the heavy part of "pick a ZIP". See extractZip in github.ts for the
-// caller. Each file goes back as its own message as soon as it is ready, so the
-// main thread never has to receive one huge message.
+// caller. Group small files to reduce message overhead. Send large files individually.
 import "./setImmediateShim"; // must stay first: it has to run before jszip does
 import JSZip from "jszip";
+import type { ExtractedFile } from "../github";
 import { extractZipEntries } from "../zipExtract";
 
 const scope = self as unknown as {
@@ -14,11 +14,28 @@ const scope = self as unknown as {
 scope.postMessage({ type: "ready" });
 
 scope.onmessage = async (event: MessageEvent<{ file: Blob }>) => {
+  let files: ExtractedFile[] = [];
+  let chars = 0;
+  const maxChars = 256 * 1024;
+  const flush = () => {
+    if (!files.length) return;
+    scope.postMessage({ type: "files", files });
+    files = [];
+    chars = 0;
+  };
+
   try {
     await extractZipEntries(JSZip, event.data.file, {
-      onFile: (path, content) => scope.postMessage({ type: "file", path, content }),
+      onFile: (path, content) => {
+        const size = path.length + content.length;
+        if (chars + size > maxChars) flush();
+        files.push({ path, content });
+        chars += size;
+        if (files.length === 32 || chars >= maxChars) flush();
+      },
       yieldBetweenBatches: false, // nothing to keep responsive in a worker
     });
+    flush();
     scope.postMessage({ type: "done", result: null });
   } catch (err: any) {
     // The message is shown to the visitor as is (size limits, "not a ZIP", ...).

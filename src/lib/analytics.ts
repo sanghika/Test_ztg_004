@@ -103,3 +103,4 @@ const analytics = createAnalytics(
 
 export const trackEvent = analytics.trackEvent;
 export const trackPageView = analytics.trackPageView;
+export const analyticsEnabled = analytics.isEnabled;

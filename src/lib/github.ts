@@ -45,9 +45,9 @@ const extractZipInWorker = async (
 ): Promise<ExtractedFile[]> => {
   const result: ExtractedFile[] = [];
   await runWorkerJob<null>(takeWorker("extract", createExtractWorker), { file }, (m) => {
-    if (m.type === "file") {
-      result.push({ path: m.path, content: m.content });
-      onProgress?.(m.path);
+    if (m.type === "files") {
+      result.push(...m.files);
+      onProgress?.(m.files[m.files.length - 1].path);
     }
   });
   return result;

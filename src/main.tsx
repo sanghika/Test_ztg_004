@@ -2,6 +2,10 @@ import {StrictMode} from 'react';
 import {createRoot, hydrateRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
+import { reportWebVitals } from './lib/reportWebVitals';
+
+// A failed analytics download must not interfere with rendering.
+void reportWebVitals().catch(() => {});
 
 const container = document.getElementById('root')!;
 const app = (

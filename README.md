@@ -31,6 +31,12 @@ Push ZIP archives directly to GitHub repositories without Git CLI.
 
 **Security note:** the GitHub access token is never sent to or stored in the browser. It lives only in an HttpOnly, signed session cookie, and all GitHub API calls are proxied through the server (`server/githubService.ts`). If you're upgrading from an older version of this app, existing users will need to disconnect and reconnect their GitHub account once, both to migrate off client-stored tokens and to grant the `delete_repo` OAuth scope used by the delete-repository feature.
 
+## Core Web Vitals
+
+Production builds with `VITE_GA_MEASUREMENT_ID` configured sample 10% of document visits. The `web_vital` GA4 event reports LCP and INP in milliseconds and CLS as a unitless score. The event includes the entry route (an allowlisted public path), viewport size class, and whether the session cookie hint was present at entry. A client-side route change belongs to the same document visit. An INP sample requires a qualifying interaction.
+
+To inspect event parameters in GA4 reports, register `metric_name`, `metric_rating`, `entry_route`, `entry_session`, and `viewport_class` as event-scoped custom dimensions. For a 75th-percentile report in the GA4 BigQuery export, use the latest `metric_value` per `metric_id`, then group by metric and the dimensions of interest. This counts a visit's updated measurement once.
+
 ## First paint
 
 `npm run build` prerenders the home page (signed-out hero) and the content pages (`/how-it-works`, `/faq`, `/privacy`, `/terms`, `/contact`) to static HTML, so the page's `<h1>` is in the HTML itself and paints without waiting for JS or an API call.
