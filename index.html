@@ -71,17 +71,9 @@
       })();
     </script>
 
-    <!-- Typography: Inter is the UI typeface (400 body, 500 controls, 600 headings;
-         bold is not used) and JetBrains Mono (400) is only for text that must be
-         read character by character. Both are self-hosted Latin subsets in
-         /public/fonts, declared with @font-face in src/index.css (see the notes
-         there), so there is no request to Google Fonts. The three Inter weights
-         are preloaded because all of them are used above the fold; the mono is
-         not, it only shows in the file tree, inputs and the desktop terminal.
-         crossorigin is required on font preloads, even for same-origin files. -->
-    <link rel="preload" href="/fonts/inter-4.0-latin-400.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="preload" href="/fonts/inter-4.0-latin-500.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="preload" href="/fonts/inter-4.0-latin-600.woff2" as="font" type="font/woff2" crossorigin />
+    <!-- One self-hosted Latin subset covers the UI's 400–600 weights.
+         crossorigin is required for font preloads, including same-origin URLs. -->
+    <link rel="preload" href="/fonts/inter-4.0-latin-variable-400-600.woff2" as="font" type="font/woff2" crossorigin />
 
     <!-- Open Graph Tags -->
     <meta property="og:title" content="ZiptoGit - Fast ZIP to GitHub Pushing" />
