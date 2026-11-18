@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useId, lazy, Suspense } from "react";
-import { fetchRepositories, type BootstrapData, warmZipExtractor, extractZip, extractFolder, filesFromDataTransferItems, uploadToGitHub, ExtractedFile, fetchRepoTree, deleteRepoPaths, deleteRepository, createRepository, logout as apiLogout, RepoTreeEntry } from "./lib/github";
+import { useState, useEffect, useMemo, useRef, useId, lazy, Suspense } from "react";
+import { fetchRepositories, type BootstrapData, type RepoSummary, warmZipExtractor, extractZip, extractFolder, filesFromDataTransferItems, uploadToGitHub, ExtractedFile, fetchRepoTree, deleteRepoPaths, deleteRepository, createRepository, logout as apiLogout, RepoTreeEntry } from "./lib/github";
 import { trackEvent } from "./lib/analytics";
 import { mergeRepos } from "./lib/repos";
 import { avatarSrc, AVATAR_PX } from "./lib/avatar";
@@ -23,10 +23,9 @@ const RepoFileTree = lazy(loadRepoFileTree);
 // Never a real full_name, so it can't collide with an actual repo.
 const CREATE_NEW_REPO_VALUE = "__create_new_repo__";
 
-// Suggests the next free "ziptogit.in_newN" name given the user's existing
-// repos, so the default we show never collides with one they already have.
-function suggestRepoName(existingRepos: any[]): string {
-  const takenNames = new Set(existingRepos.map((r) => String(r.name).toLowerCase()));
+// Suggest a name based on the repositories loaded in the picker.
+function suggestRepoName(existingRepos: RepoSummary[]): string {
+  const takenNames = new Set(existingRepos.map((repo) => repo.name.toLowerCase()));
   let i = 1;
   while (takenNames.has(`ziptogit.in_new${i}`.toLowerCase())) i++;
   return `ziptogit.in_new${i}`;
@@ -145,12 +144,10 @@ function SidebarItem({
 export default function Dashboard({ account, onDisconnect }: { account: BootstrapData; onDisconnect: () => void }) {
   const { user, repos: firstPage, nextPage } = account;
   const [repos, setRepos] = useState(firstPage);
-  // The repository list arrives page by page: the first page with the user (so
-  // the dashboard can appear), the rest in the background. repoLoadGen is bumped
-  // whenever that background load must stop being applied (sign-out, a new load).
+  const [nextRepoPage, setNextRepoPage] = useState(nextPage);
   const [isLoadingMoreRepos, setIsLoadingMoreRepos] = useState(false);
   const [repoListError, setRepoListError] = useState<string | null>(null);
-  const repoLoadGen = useRef(0);
+  const repoPageRequest = useRef<AbortController | null>(null);
   const [selectedRepoFullId, setSelectedRepoFullId] = useState(firstPage[0]?.full_name ?? "");
   // The default branch comes with the repository list, and passing it to the
   // file-tree request saves the server two GitHub round trips. A ref, so the
@@ -159,7 +156,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   const reposRef = useRef(repos);
   reposRef.current = repos;
   const defaultBranchOf = (fullName: string): string | undefined =>
-    reposRef.current.find((r: any) => r.full_name === fullName)?.default_branch || undefined;
+    reposRef.current.find((repo) => repo.full_name === fullName)?.default_branch || undefined;
 
   // --- Create a new repository directly from the dropdown --- //
   const [isCreatingRepo, setIsCreatingRepo] = useState(false);
@@ -222,32 +219,34 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   const newRepoNameId = useId();
   const deleteConfirmHintId = useId();
 
-  // Pages 2.. of the repository list, one after another, appended as they
-  // arrive. Runs after the UI is already showing.
-  const loadMoreRepos = async (startPage: number, gen: number) => {
+  const canLoadMoreRepos = !isLoadingMoreRepos && !isUploading && !isCreatingRepo && !isSubmittingNewRepo && !isDeletingRepo;
+  const loadMoreRepos = async () => {
+    if (nextRepoPage === null || !canLoadMoreRepos || repoPageRequest.current) return;
+    const request = new AbortController();
+    repoPageRequest.current = request;
     setIsLoadingMoreRepos(true);
+    setRepoListError(null);
     try {
-      let page: number | null = startPage;
-      while (page && gen === repoLoadGen.current) {
-        const result = await fetchRepositories(page);
-        if (gen !== repoLoadGen.current) return;
-        setRepos((prev) => mergeRepos(prev, result.repos));
-        page = result.nextPage;
-      }
+      const result = await fetchRepositories(nextRepoPage, request.signal);
+      if (request.signal.aborted) return;
+      setRepos((prev) => mergeRepos(prev, result.repos));
+      setNextRepoPage(result.nextPage);
     } catch (err) {
-      if (gen !== repoLoadGen.current) return;
+      if (request.signal.aborted) return;
       console.error(err);
-      setRepoListError("Some of your repositories could not be loaded. Reload the page to try again.");
+      setRepoListError("Could not load more repositories. Try again.");
     } finally {
-      if (gen === repoLoadGen.current) setIsLoadingMoreRepos(false);
+      if (repoPageRequest.current === request) {
+        repoPageRequest.current = null;
+        setIsLoadingMoreRepos(false);
+      }
     }
   };
 
-  useEffect(() => {
-    const gen = ++repoLoadGen.current;
-    if (nextPage) void loadMoreRepos(nextPage, gen);
-    return () => { repoLoadGen.current++; };
-  }, [nextPage]);
+  useEffect(() => () => {
+    repoPageRequest.current?.abort();
+    repoPageRequest.current = null;
+  }, []);
 
   const clearPushResult = () => {
     setUploadSuccessUrl(null);
@@ -310,7 +309,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
     try {
       const repo = await createRepository(name, newRepoIsPrivate);
       trackEvent("repo_created", { is_private: newRepoIsPrivate });
-      setRepos((prev: any[]) => [repo, ...prev]);
+      setRepos((prev) => mergeRepos([repo], prev));
       setSelectedRepoFullId(repo.full_name);
       resetRepoScopedState();
       setIsCreatingRepo(false);
@@ -605,7 +604,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   };
 
   const handleDeleteRepo = async () => {
-    if (!selectedRepoFullId) return;
+    if (!selectedRepoFullId || repoPageRequest.current) return;
     const [owner, repo] = selectedRepoFullId.split("/");
     if (deleteRepoConfirmText !== repo) return;
 
@@ -614,8 +613,10 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
     try {
       await deleteRepository(owner, repo);
       trackEvent("repo_deleted");
-      // Remove it from local state and reset selection since it no longer exists.
-      setRepos((prev: any[]) => prev.filter((r: any) => r.full_name !== selectedRepoFullId));
+      // Deleting an item can move an unseen repository onto the last loaded
+      // page. Revisit that boundary on the next click and deduplicate by ID.
+      setNextRepoPage((page) => page === null ? null : Math.max(1, page - 1));
+      setRepos((prev) => prev.filter((entry) => entry.full_name !== selectedRepoFullId));
       setSelectedRepoFullId("");
       setShowDeleteRepoConfirm(false);
       setDeleteRepoConfirmText("");
@@ -694,6 +695,10 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   // ---------------------------------------------------------------------------
   // Repository picker (select + inline "create new"), shared by both views
   // ---------------------------------------------------------------------------
+  const repoOptions = useMemo(() => repos.map((repo) => (
+    <option key={repo.id} value={repo.full_name}>{repo.name}</option>
+  )), [repos]);
+
   const repoPicker = (
     <>
       <div className="relative">
@@ -704,18 +709,27 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
           value={isCreatingRepo ? CREATE_NEW_REPO_VALUE : (selectedRepoFullId || "")}
           onChange={(e) => handleRepoSelectChange(e.target.value)}
           className={`${FIELD} border border-field appearance-none cursor-pointer transition-colors dark:[color-scheme:dark]`}
-          disabled={isUploading}
+          disabled={isUploading || isDeletingRepo}
         >
           <option value="" disabled>Choose a repository…</option>
-          {repos.map(r => <option key={r.id} value={r.full_name}>{r.name}</option>)}
+          {repoOptions}
           <option value={CREATE_NEW_REPO_VALUE}>+ Create new repository</option>
         </select>
         <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-muted">
           <ChevronDown className="w-4 h-4" />
         </div>
       </div>
-      {isLoadingMoreRepos && (
-        <p role="status" className="mt-2 text-sm text-muted">Loading more repositories…</p>
+      {nextRepoPage !== null && !isCreatingRepo && (
+        <button
+          type="button"
+          onClick={loadMoreRepos}
+          disabled={!canLoadMoreRepos}
+          aria-controls={repoSelectId}
+          aria-busy={isLoadingMoreRepos}
+          className={`${BTN} ${BTN_SECONDARY} mt-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed`}
+        >
+          {isLoadingMoreRepos ? "Loading repositories…" : repoListError ? "Retry loading repositories" : "Load more repositories"}
+        </button>
       )}
       {repoListError && <Alert variant="error" className="mt-2">{repoListError}</Alert>}
 
@@ -1141,7 +1155,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
                     <button
                       type="button"
                       onClick={handleDeleteRepo}
-                      disabled={deleteRepoConfirmText !== selectedRepoName || isDeletingRepo}
+                      disabled={deleteRepoConfirmText !== selectedRepoName || isDeletingRepo || isLoadingMoreRepos}
                       className={`${BTN} flex-1 text-sm ${
                         isDeletingRepo ? "bg-red-700 text-white cursor-progress" : BTN_DANGER
                       }`}
