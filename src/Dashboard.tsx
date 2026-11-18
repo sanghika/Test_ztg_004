@@ -320,6 +320,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
   };
 
   const handleCreateRepo = async () => {
+    if (isSubmittingNewRepo) return;
     const name = newRepoName.trim();
     if (!name) {
       setCreateRepoErrorMsg("Please enter a repository name.");
@@ -422,7 +423,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
     if (files.length === 0) return;
     // webkitRelativePath looks like "my-project/src/App.tsx" — take the
     // first segment as the folder's display name.
-    const folderName = ((files[0] as any).webkitRelativePath || files[0].name).split("/")[0];
+    const folderName = (files[0].webkitRelativePath || files[0].name).split("/")[0];
     await processFolder(files, folderName);
   };
 
@@ -462,7 +463,16 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
       setIsReadingFolder(true);
       try {
         const files = await filesFromDataTransferItems(e.dataTransfer.items);
-        if (sourceVersion.current === version) await processFolder(files, entry.name);
+        if (sourceVersion.current !== version) return;
+        if (files.length === 0) {
+          setErrorMsg("This folder doesn't contain any files to upload.");
+          return;
+        }
+        await processFolder(files, entry.name);
+      } catch (err) {
+        if (sourceVersion.current === version) {
+          setErrorMsg(err instanceof Error ? err.message : "Could not read the dropped folder. Try again.");
+        }
       } finally {
         if (sourceVersion.current === version) setIsReadingFolder(false);
       }
@@ -757,7 +767,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
           value={isCreatingRepo ? CREATE_NEW_REPO_VALUE : (selectedRepoFullId || "")}
           onChange={(e) => handleRepoSelectChange(e.target.value)}
           className={`${FIELD} border border-field appearance-none cursor-pointer transition-colors dark:[color-scheme:dark]`}
-          disabled={isUploading || isDeletingRepo}
+          disabled={isUploading || isDeletingRepo || isSubmittingNewRepo}
         >
           <option value="" disabled>Choose a repository…</option>
           {repoOptions}

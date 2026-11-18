@@ -92,13 +92,43 @@ describe("/api/auth/url", () => {
 
   it("sets a signed, HttpOnly oauth_state cookie bound to the generated state", async () => {
     const res = await request(app).get("/api/auth/url");
-    const setCookie = getSetCookies(res).join(";");
-    expect(setCookie).toContain("oauth_state=");
+    const state = new URL(res.body.url).searchParams.get("state");
+    const setCookie = getSetCookies(res).find((cookie) => cookie.startsWith(`oauth_state_${state}=`));
+    expect(setCookie).toContain(encodeURIComponent(`s:${state}.`));
     expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).toContain("Path=/auth/callback");
+    expect(res.headers["cache-control"]).toBe("no-store");
   });
 });
 
 describe("/auth/callback", () => {
+  it("keeps two sign-in attempts independent in the same browser", async () => {
+    const browser = request.agent(app);
+    const [first, second] = await Promise.all([
+      browser.get("/api/auth/url"),
+      browser.get("/api/auth/url"),
+    ]);
+    const firstState = new URL(first.body.url).searchParams.get("state");
+    const secondState = new URL(second.body.url).searchParams.get("state");
+    expect(firstState).not.toBe(secondState);
+
+    for (const state of [firstState, secondState]) {
+      const result = await browser.get(`/auth/callback?state=${state}`);
+      // Both reach the code check, because each has its own matching cookie.
+      expect(result.status).toBe(400);
+      expect(result.text).toBe("No code provided.");
+    }
+  });
+
+  it("still accepts an in-progress sign-in from before the deployment", async () => {
+    const state = "a".repeat(32);
+    const res = await request(app)
+      .get(`/auth/callback?state=${state}`)
+      .set("Cookie", signedCookie("oauth_state", state));
+    expect(res.text).toBe("No code provided.");
+    expect(getSetCookies(res).some((cookie) => cookie.startsWith("oauth_state=;"))).toBe(true);
+  });
+
   it("returns 400 when no code is provided, even with a valid matching state", async () => {
     // Uses a real state/cookie pair from /api/auth/url so this test isolates
     // the missing-code check specifically, rather than accidentally being

@@ -3,9 +3,55 @@
 // (fallback when Web Workers are unavailable). Only types are imported from
 // jszip, so the caller decides how the library is loaded.
 import type JSZip from "jszip";
-import { estimateBytesFromBase64, MAX_TOTAL_UPLOAD_BYTES, MAX_SINGLE_FILE_BYTES } from "./uploadLimits";
+import { MAX_TOTAL_UPLOAD_BYTES, MAX_SINGLE_FILE_BYTES } from "./uploadLimits";
+import { shouldSkipUploadPath } from "./uploadPaths";
 
 const formatMB = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+
+// JSZip documents the file entry's internalStream API. Its type declaration
+// currently includes the stream helper but omits that method on file entries.
+type ZipFileEntry = JSZip.JSZipObject & {
+  internalStream(type: "uint8array"): JSZip.JSZipStreamHelper<Uint8Array>;
+};
+
+function readZipFile(entry: JSZip.JSZipObject, path: string, bytesSoFar: number) {
+  return new Promise<{ base64: string; bytes: number }>((resolve, reject) => {
+    const stream = (entry as ZipFileEntry).internalStream("uint8array");
+    let bytes = 0;
+    let exceededLimit = false;
+    const encoded: string[] = [];
+    let tail = "";
+
+    stream.on("data", (chunk) => {
+      if (exceededLimit) return;
+      bytes += chunk.length;
+      if (bytes > MAX_SINGLE_FILE_BYTES || bytesSoFar + bytes > MAX_TOTAL_UPLOAD_BYTES) {
+        exceededLimit = true;
+        stream.pause();
+        encoded.length = 0;
+        reject(new Error(bytes > MAX_SINGLE_FILE_BYTES
+          ? `"${path}" exceeds the ${formatMB(MAX_SINGLE_FILE_BYTES)} per-file limit. Remove it from the ZIP and try again.`
+          : `This ZIP is larger than the ${formatMB(MAX_TOTAL_UPLOAD_BYTES)} total upload limit. Try splitting it into smaller pushes.`));
+        return;
+      }
+
+      // Encode complete groups of three bytes. Carry any remainder to the next
+      // chunk so Base64 padding is written only once, at the end of the file.
+      const maxSlice = 16 * 1024;
+      for (let offset = 0; offset < chunk.length; offset += maxSlice) {
+        const text = tail + String.fromCharCode(...chunk.subarray(offset, offset + maxSlice));
+        const boundary = text.length - text.length % 3;
+        encoded.push(btoa(text.slice(0, boundary)));
+        tail = text.slice(boundary);
+      }
+    }).on("error", reject).on("end", () => {
+      if (!exceededLimit) {
+        encoded.push(btoa(tail));
+        resolve({ base64: encoded.join(""), bytes });
+      }
+    }).resume();
+  });
+}
 
 export interface ZipExtractHooks {
   /** Called once per file, in archive order, after it passed the size checks. */
@@ -23,12 +69,9 @@ export async function extractZipEntries(
 
   const entries: { path: string; entry: JSZip.JSZipObject }[] = [];
   zip.forEach((relativePath, zipEntry) => {
-    if (!zipEntry.dir && !relativePath.includes("__MACOSX") && !relativePath.startsWith(".DS_Store")) {
-      if (relativePath.includes("../") || relativePath.includes("..\\") || relativePath.startsWith("/")) {
-        return;
-      }
-      entries.push({ path: relativePath, entry: zipEntry });
-    }
+    if (zipEntry.dir || shouldSkipUploadPath(relativePath)) return;
+    if (relativePath.includes("../") || relativePath.includes("..\\") || relativePath.startsWith("/")) return;
+    entries.push({ path: relativePath, entry: zipEntry });
   });
 
   if (entries.length === 0) {
@@ -51,36 +94,14 @@ export async function extractZipEntries(
   }
 
   let totalBytes = 0;
-  const MAX_CONCURRENT_EXTRACT = 6;
-  for (let i = 0; i < entries.length; i += MAX_CONCURRENT_EXTRACT) {
-    const batch = entries.slice(i, i + MAX_CONCURRENT_EXTRACT);
-    const batchResults = await Promise.all(
-      batch.map(async (item) => ({ item, base64Content: await item.entry.async("base64") }))
-    );
+  for (const [i, { path, entry }] of entries.entries()) {
+    // One stream at a time lets every chunk enforce the remaining ZIP budget.
+    const { base64, bytes } = await readZipFile(entry, path, totalBytes);
+    totalBytes += bytes;
+    hooks.onFile(path, base64);
 
-    // Applied in original order (not completion order) so size-limit errors
-    // are always reported deterministically.
-    for (const { item, base64Content } of batchResults) {
-      // Fail fast instead of extracting the entire (possibly huge) ZIP into
-      // memory first — a very large archive can otherwise hang or crash the tab.
-      const fileBytes = estimateBytesFromBase64(base64Content);
-      if (fileBytes > MAX_SINGLE_FILE_BYTES) {
-        throw new Error(
-          `"${item.path}" is ${formatMB(fileBytes)}, which is over GitHub's ${formatMB(MAX_SINGLE_FILE_BYTES)} per-file limit. Remove it from the ZIP and try again.`
-        );
-      }
-      totalBytes += fileBytes;
-      if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
-        throw new Error(
-          `This ZIP is larger than the ${formatMB(MAX_TOTAL_UPLOAD_BYTES)} total upload limit. Try splitting it into smaller pushes or removing large/unnecessary files (e.g. node_modules, build output).`
-        );
-      }
-
-      hooks.onFile(item.path, base64Content);
+    if (hooks.yieldBetweenBatches && (i + 1) % 6 === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
     }
-
-    // On the main thread, yield between batches (rather than every 10 files)
-    // so the progress UI keeps painting without giving up the concurrency win.
-    if (hooks.yieldBetweenBatches) await new Promise((resolve) => setTimeout(resolve, 0));
   }
 }
