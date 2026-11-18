@@ -1,8 +1,8 @@
 """Production browser regressions for uploads, deletions, and sign-out.
 
-Start the app with npm run build && NODE_ENV=production npm start.
+Start the production build locally with the settings in README.md.
 With Python Playwright and Chromium installed, run python scripts/test_dashboard_races.py.
-Set CHROMIUM_PATH to use a system Chromium. GitHub requests are mocked.
+Set CHROMIUM_PATH to use a system Chromium. Set ZTG_TEST_ORIGIN for a custom port. GitHub requests are mocked.
 """
 
 import gzip
@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 from playwright.sync_api import expect, sync_playwright
 
 
-ORIGIN = "http://localhost:3000"
+ORIGIN = os.getenv("ZTG_TEST_ORIGIN", "http://localhost:3000")
 
 
 def archive(name):

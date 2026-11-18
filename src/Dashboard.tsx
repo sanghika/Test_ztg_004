@@ -1,6 +1,6 @@
 import { Component, useState, useEffect, useLayoutEffect, useMemo, useRef, useId, lazy, Suspense } from "react";
 import { fetchRepositories, type BootstrapData, type RepoSummary, warmZipExtractor, extractZip, extractFolder, filesFromDataTransferItems, uploadToGitHub, ExtractedFile, fetchRepoTree, deleteRepoPaths, deleteRepository, createRepository, logout as apiLogout, RepoTreeEntry } from "./lib/github";
-import { trackEvent } from "./lib/analytics";
+import { analyticsErrorKind, trackEvent } from "./lib/analytics";
 import { mergeRepos } from "./lib/repos";
 import { SECRET_SCAN_NOTE } from "./lib/uploadLimits";
 import type { SanitizeReport } from "./lib/secretScanner";
@@ -400,13 +400,13 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
       setErrorMsg("Please select a valid ZIP file.");
       return;
     }
-    trackEvent("zip_uploaded", { size_bytes: file.size, file_name: file.name });
+    trackEvent("zip_uploaded", { size_bytes: file.size });
     await extractSource({ kind: "zip", name: file.name }, (progress) => extractZip(file, progress));
   };
 
   const processFolder = async (files: File[], folderName: string) => {
     if (!files.length) return;
-    trackEvent("folder_uploaded", { file_count: files.length, folder_name: folderName });
+    trackEvent("folder_uploaded", { file_count: files.length });
     await extractSource({ kind: "folder", name: folderName }, (progress) => extractFolder(files, progress));
   };
 
@@ -571,7 +571,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
       console.error("Upload error details:", err);
       const apiErrorMsg = err.response?.data?.message;
       setPushErrorMsg(apiErrorMsg ? `GitHub API Error: ${apiErrorMsg}` : (err.message || "An error occurred during upload."));
-      trackEvent("push_failed", { error: apiErrorMsg || err.message });
+      trackEvent("push_failed", { error_kind: analyticsErrorKind(err) });
     } finally {
       setIsUploading(false);
     }
@@ -647,7 +647,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
       if (managedRepoRef.current === selectedRepoFullId) {
         setTreeErrorMsg(err.message || "Failed to delete selected items.");
       }
-      trackEvent("repo_files_delete_failed", { error: err.message });
+      trackEvent("repo_files_delete_failed", { error_kind: analyticsErrorKind(err) });
     } finally {
       setDeletingFrom(null);
       setDeleteStatusMsg("");
@@ -681,7 +681,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
     } catch (err: any) {
       console.error("Delete repo error details:", err);
       setDeleteRepoErrorMsg(err.message || "Failed to delete repository.");
-      trackEvent("repo_delete_failed", { error: err.message });
+      trackEvent("repo_delete_failed", { error_kind: analyticsErrorKind(err) });
     } finally {
       setIsDeletingRepo(false);
     }

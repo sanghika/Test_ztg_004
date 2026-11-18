@@ -1,0 +1,10 @@
+node_modules/
+dist/
+dist-ssr/
+dist-server/
+server.js
+.env
+.env.*
+!.env.example
+__pycache__/
+.venv/

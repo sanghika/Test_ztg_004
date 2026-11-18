@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createAnalytics, trackEvent, trackPageView, type AnalyticsDocument, type AnalyticsWindow } from "./analytics";
+import { analyticsErrorKind, createAnalytics, trackEvent, trackPageView, type AnalyticsDocument, type AnalyticsWindow } from "./analytics";
 
 const makeBrowser = ({ readyState = "loading", idle = true } = {}) => {
   const loadListeners: (() => void)[] = [];
@@ -7,7 +7,7 @@ const makeBrowser = ({ readyState = "loading", idle = true } = {}) => {
   const timeouts: { cb: () => void; ms: number }[] = [];
   const scripts: { async: boolean; src: string }[] = [];
   const win: AnalyticsWindow = {
-    location: { pathname: "/faq", href: "https://ziptogit.in/faq" },
+    location: new URL("https://ziptogit.in/faq?from=private#project"),
     addEventListener: (_type, cb) => {
       loadListeners.push(cb);
     },
@@ -53,7 +53,7 @@ describe("analytics is off unless there is a real measurement ID", () => {
     const b = makeBrowser({ readyState: "complete" });
     const analytics = createAnalytics(id, { win: b.win, doc: b.doc });
 
-    analytics.trackPageView("Home");
+    analytics.trackPageView();
     analytics.trackEvent("zip_uploaded", { size_bytes: 1 });
     b.runIdle();
 
@@ -66,33 +66,40 @@ describe("analytics is off unless there is a real measurement ID", () => {
   it("does nothing outside a browser (prerender)", () => {
     const analytics = createAnalytics(REAL_ID, null);
     expect(() => {
-      analytics.trackPageView("Home");
-      analytics.trackEvent("x");
+      analytics.trackPageView();
+      analytics.trackEvent("repo_deleted");
     }).not.toThrow();
     expect(analytics.isEnabled).toBe(false);
   });
 
   it("is disabled in this test build, because there is no ID and no window", () => {
     expect(() => {
-      trackPageView("Home");
-      trackEvent("zip_uploaded");
+      trackPageView();
+      trackEvent("zip_uploaded", { size_bytes: 1 });
     }).not.toThrow();
   });
 });
+
+const faqContext = {
+  page_path: "/faq",
+  page_location: "https://ziptogit.in/faq",
+  page_title: "FAQ | ZiptoGit",
+  page_referrer: "",
+};
 
 describe("analytics with a real ID", () => {
   it("counts the first page view once: config does not send one, trackPageView does", () => {
     const b = makeBrowser();
     const analytics = createAnalytics(REAL_ID, { win: b.win, doc: b.doc });
 
-    analytics.trackPageView("Home");
+    analytics.trackPageView();
 
     const entries = queued(b.win);
     const configs = entries.filter((e) => e[0] === "config");
     const pageViews = entries.filter((e) => e[0] === "event" && e[1] === "page_view");
-    expect(configs).toEqual([["config", REAL_ID, { send_page_view: false }]]);
+    expect(configs).toEqual([["config", REAL_ID, { send_page_view: false, ...faqContext }]]);
     expect(pageViews).toEqual([
-      ["event", "page_view", { page_path: "/faq", page_location: "https://ziptogit.in/faq", page_title: "Home" }],
+      ["event", "page_view", faqContext],
     ]);
   });
 
@@ -100,19 +107,43 @@ describe("analytics with a real ID", () => {
     const b = makeBrowser();
     const analytics = createAnalytics(REAL_ID, { win: b.win, doc: b.doc });
 
-    analytics.trackPageView("Home");
+    analytics.trackPageView();
     analytics.trackEvent("zip_uploaded", { size_bytes: 10 });
-    analytics.trackPageView("FAQ");
+    analytics.trackPageView();
 
     const names = queued(b.win).map((e) => e[0] === "event" ? `event:${e[1]}` : e[0]);
-    expect(names).toEqual(["js", "config", "event:page_view", "event:zip_uploaded", "event:page_view"]);
+    expect(names).toEqual(["js", "config", "set", "event:page_view", "event:zip_uploaded", "set", "event:page_view"]);
   });
 
-  it("leaves page_title out when there is none", () => {
+  it("groups unknown URLs and never includes their path, query, or fragment", () => {
     const b = makeBrowser();
-    createAnalytics(REAL_ID, { win: b.win, doc: b.doc }).trackPageView();
-    const pageView = queued(b.win).find((e) => e[1] === "page_view")!;
-    expect(pageView[2]).toEqual({ page_path: "/faq", page_location: "https://ziptogit.in/faq" });
+    b.win.location = new URL("https://ziptogit.in/private-project?token=local#filename");
+    const analytics = createAnalytics(REAL_ID, { win: b.win, doc: b.doc });
+    analytics.trackPageView();
+    analytics.trackEvent("repo_deleted");
+
+    const entries = queued(b.win);
+    expect(JSON.stringify(entries)).not.toMatch(/private-project|token=local|filename/);
+    expect(entries.at(-1)).toEqual(["event", "repo_deleted", {
+      page_path: "/other",
+      page_location: "https://ziptogit.in/other",
+      page_title: "Page not found | ZiptoGit",
+      page_referrer: "",
+    }]);
+  });
+
+  it("filters extra upload details and sends an error category instead of an API message", () => {
+    const b = makeBrowser();
+    const analytics = createAnalytics(REAL_ID, { win: b.win, doc: b.doc });
+    const upload = { size_bytes: 20, file_name: "private-project.zip" };
+    analytics.trackEvent("zip_uploaded", upload);
+    const error = Object.assign(new Error("Could not push private-project.zip"), { status: 503 });
+    const failure = { error_kind: analyticsErrorKind(error), error: error.message };
+    analytics.trackEvent("push_failed", failure);
+    expect(queued(b.win).slice(-2)).toEqual([
+      ["event", "zip_uploaded", { size_bytes: 20, ...faqContext }],
+      ["event", "push_failed", { error_kind: "server", ...faqContext }],
+    ]);
   });
 
   it("queues events made before gtag.js has arrived", () => {
@@ -120,14 +151,14 @@ describe("analytics with a real ID", () => {
     createAnalytics(REAL_ID, { win: b.win, doc: b.doc }).trackEvent("push_successful", { files_count: 3 });
 
     expect(b.scripts).toHaveLength(0);
-    expect(queued(b.win).at(-1)).toEqual(["event", "push_successful", { files_count: 3 }]);
+    expect(queued(b.win).at(-1)).toEqual(["event", "push_successful", { files_count: 3, ...faqContext }]);
   });
 
   it("adds gtag.js only after the load event and an idle moment, and only once", () => {
     const b = makeBrowser({ readyState: "loading" });
     const analytics = createAnalytics(REAL_ID, { win: b.win, doc: b.doc });
 
-    analytics.trackPageView("Home");
+    analytics.trackPageView();
     expect(b.scripts).toHaveLength(0); // page has not loaded yet
 
     b.fireLoad();
@@ -138,7 +169,7 @@ describe("analytics with a real ID", () => {
     expect(b.scripts[0].async).toBe(true);
     expect(b.scripts[0].src).toBe(`https://www.googletagmanager.com/gtag/js?id=${REAL_ID}`);
 
-    analytics.trackPageView("FAQ");
+    analytics.trackPageView();
     b.fireLoad();
     b.runIdle();
     expect(b.scripts).toHaveLength(1);
@@ -146,7 +177,7 @@ describe("analytics with a real ID", () => {
 
   it("waits for idle, without waiting for a load that already happened", () => {
     const b = makeBrowser({ readyState: "complete" });
-    createAnalytics(REAL_ID, { win: b.win, doc: b.doc }).trackPageView("Home");
+    createAnalytics(REAL_ID, { win: b.win, doc: b.doc }).trackPageView();
 
     expect(b.scripts).toHaveLength(0);
     b.runIdle();
@@ -155,7 +186,7 @@ describe("analytics with a real ID", () => {
 
   it("falls back to a timeout where requestIdleCallback does not exist", () => {
     const b = makeBrowser({ readyState: "complete", idle: false });
-    createAnalytics(REAL_ID, { win: b.win, doc: b.doc }).trackPageView("Home");
+    createAnalytics(REAL_ID, { win: b.win, doc: b.doc }).trackPageView();
 
     expect(b.scripts).toHaveLength(0);
     expect(b.timeouts).toHaveLength(1);

@@ -10,6 +10,7 @@ import * as githubService from "./server/githubService";
 import { createSessionData } from "./server/sessionData";
 import { scanPrecompressed, sendPrecompressed, servePrecompressed } from "./server/precompressed";
 import { hasFileExtension } from "./server/spaFallback";
+import { readAuthConfig, readPort } from "./server/config";
 import { findPublicPage, NOT_FOUND_PAGE, PRERENDER_ROUTES } from "./src/routes";
 
 const TOKEN_COOKIE = "gh_session";
@@ -45,13 +46,8 @@ export async function createApp() {
     app.set("trust proxy", Number.isInteger(hops) && hops >= 1 ? hops : 1);
   }
 
-  if (!isTest && !process.env.SESSION_SECRET) {
-    console.warn(
-      "WARNING: SESSION_SECRET is not set. Falling back to GITHUB_CLIENT_SECRET to sign session cookies. " +
-      "Set a dedicated SESSION_SECRET env var in production."
-    );
-  }
-  const cookieSecret = process.env.SESSION_SECRET || process.env.GITHUB_CLIENT_SECRET || "dev-only-insecure-secret";
+  const { appOrigin, clientId, clientSecret, cookieSecret } = readAuthConfig(process.env);
+  const redirectUri = appOrigin + OAUTH_CALLBACK_PATH;
 
   // Compresses JSON API responses and static assets (HTML/CSS/JS) on the
   // wire. /api/delete-paths streams newline-delimited JSON progress events and
@@ -221,7 +217,6 @@ export async function createApp() {
   // --- OAuth --- //
 
   app.get("/api/auth/url", (req, res) => {
-    const redirectUri = `${process.env.APP_URL}${OAUTH_CALLBACK_PATH}`;
     // The state value is generated server-side and bound to a signed,
     // HttpOnly cookie rather than trusted from the client. /auth/callback
     // validates the returned state against this cookie before exchanging
@@ -241,7 +236,7 @@ export async function createApp() {
       maxAge: 1000 * 60 * 10, // 10 minutes; only needs to survive the redirect round trip
     });
     const params = new URLSearchParams({
-      client_id: process.env.GITHUB_CLIENT_ID || "",
+      client_id: clientId,
       redirect_uri: redirectUri,
       scope: "repo delete_repo", // "repo" for read/write access; "delete_repo" is required to delete repositories
       state,
@@ -271,7 +266,6 @@ export async function createApp() {
     }
 
     try {
-      const redirectUri = `${process.env.APP_URL}${OAUTH_CALLBACK_PATH}`;
       const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
         method: "POST",
         headers: {
@@ -279,8 +273,8 @@ export async function createApp() {
           "Accept": "application/json"
         },
         body: JSON.stringify({
-          client_id: process.env.GITHUB_CLIENT_ID,
-          client_secret: process.env.GITHUB_CLIENT_SECRET,
+          client_id: clientId,
+          client_secret: clientSecret,
           code,
           redirect_uri: redirectUri,
         })
@@ -292,15 +286,13 @@ export async function createApp() {
         // The token is set as an HttpOnly cookie the browser can never read via JS,
         // and is never included in the postMessage payload sent to the opener window.
         setSessionCookie(res, tokenData.access_token);
-        const safeState = state.replace(/'/g, "\\'");
-        const targetOrigin = (process.env.APP_URL || "").replace(/'/g, "\\'");
         res.send(`
           <html>
             <body>
               <script>
                 if (window.opener) {
                   try {
-                    window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', state: '${safeState}' }, '${targetOrigin}');
+                    window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', state: ${JSON.stringify(state)} }, ${JSON.stringify(appOrigin)});
                     window.close();
                   } catch (e) {
                     window.location.href = '/';
@@ -634,13 +626,16 @@ export async function createApp() {
 }
 
 async function startServer() {
-  const PORT = 3000;
+  const port = readPort(process.env.PORT);
   const app = await createApp();
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on port ${PORT}`);
+  app.listen(port, "0.0.0.0", () => {
+    console.log(`Server running on port ${port}`);
   });
 }
 
 if (process.env.NODE_ENV !== "test") {
-  startServer();
+  void startServer().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : "Server startup failed.");
+    process.exitCode = 1;
+  });
 }

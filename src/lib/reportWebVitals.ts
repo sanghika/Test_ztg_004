@@ -1,18 +1,15 @@
 import type { Metric } from "web-vitals";
-import { PAGE_TITLES } from "../routes";
+import { findPublicPage } from "../routes";
 import { analyticsEnabled, trackEvent } from "./analytics";
 import { readSessionFlag, sessionPending } from "./session";
 
 function entryContext() {
-  const path = location.pathname.replace(/\/+$/, "") || "/";
-  const route = path === "/" || Object.hasOwn(PAGE_TITLES, path) ? path : "/other";
+  const route = findPublicPage(location.pathname)?.path ?? "/other";
   return {
     entry_route: route,
     entry_session: readSessionFlag() || sessionPending() ? "returning" : "signed_out",
     viewport_class: innerWidth < 640 ? "small" : innerWidth < 1024 ? "medium" : "large",
-    page_location: location.origin + route,
-    page_referrer: "",
-  };
+  } as const;
 }
 
 export async function reportWebVitals() {
