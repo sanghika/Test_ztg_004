@@ -333,7 +333,7 @@ function SiteHeader({ widthClass, theme, onToggleTheme }: { widthClass: string; 
   );
 }
 
-// Looping demo of what the app does (extract -> scan -> commit -> push) for the
+// One-pass demo of what the app does (extract -> scan -> commit -> push) for the
 // signed-out desktop screen. It sits inside the card, so it has a border and no
 // shadow of its own (elevation-raised is for things that float: the menu). Purely decorative (aria-hidden): the heading and
 // copy next to it say the same thing in words. The ztg-* keyframes it uses live
@@ -360,19 +360,15 @@ function ZipToGitTerminal() {
   const rootRef = useRef<HTMLDivElement>(null);
   const inView = useInView(rootRef);
   const pageVisible = usePageVisible();
-  const running = !reduceMotion && isShown && inView && pageVisible;
-  // tick counts up forever; each loop is 5 ticks: stages 0-3, then one beat
-  // holding the finished state before the next loop starts.
   const [tick, setTick] = useState(0);
+  const finished = reduceMotion || tick === TERMINAL_STAGES.length;
+  const stage = finished ? TERMINAL_STAGES.length - 1 : tick;
+  const running = !finished && isShown && inView && pageVisible;
   useEffect(() => {
     if (!running) return;
-    const id = window.setInterval(() => setTick((t) => t + 1), 1800);
-    return () => window.clearInterval(id);
-  }, [running]);
-  const phase = tick % 5;
-  const loop = Math.floor(tick / 5);
-  const stage = reduceMotion ? 3 : Math.min(phase, 3);
-  const finished = reduceMotion || phase === 4;
+    const id = window.setTimeout(() => setTick(tick + 1), 1800);
+    return () => window.clearTimeout(id);
+  }, [running, tick]);
 
   return (
     <div
@@ -391,7 +387,7 @@ function ZipToGitTerminal() {
           visibility:hidden (it keeps its space), and printing it plays an
           opacity + transform animation. Nothing is added or removed, so the
           card, the vertically centred panel and the stage bar never move
-          (no layout shift), and the loop restart does not collapse the panel.
+          (no layout shift).
           The hidden copy holds the same text, so a line that wraps at a narrow
           width reserves the same height as the visible one. */}
       <div className="p-4 space-y-2">
@@ -399,7 +395,7 @@ function ZipToGitTerminal() {
         <div className="flex flex-wrap gap-2 py-1">
           {TERMINAL_FILES.map((f, i) => (
             <span
-              key={`${loop}-${f}`}
+              key={f}
               style={{ animation: `ztg-chip-in 420ms ease-out ${i * 140}ms both` }}
               className="px-2 py-1 rounded-control bg-white/10 text-slate-200"
             >
@@ -407,13 +403,11 @@ function ZipToGitTerminal() {
             </span>
           ))}
         </div>
-        {TERMINAL_LINES.map((l, i) => {
+        {TERMINAL_LINES.map((l) => {
           const shown = stage >= l.at;
           return (
             <p
-              // A new key when a line appears (and again on each loop) remounts
-              // it, which restarts its entrance animation.
-              key={shown ? `${loop}-${i}` : `idle-${i}`}
+              key={l.text}
               style={shown ? { animation: "ztg-line-in 300ms ease-out both" } : undefined}
               className={`${l.ok ? "text-emerald-400" : "text-slate-300"}${shown ? "" : " invisible"}`}
             >
@@ -421,7 +415,7 @@ function ZipToGitTerminal() {
             </p>
           );
         })}
-        <div key={stage >= 2 ? `${loop}-node` : "idle-node"} className={`flex items-center gap-3 pt-1${stage >= 2 ? "" : " invisible"}`}>
+        <div className={`flex items-center gap-3 pt-1${stage >= 2 ? "" : " invisible"}`}>
           <span
             style={stage >= 2 ? { animation: "ztg-node-pop 450ms ease-out both" } : undefined}
             className="w-3 h-3 rounded-full bg-emerald-400 shrink-0"
@@ -429,7 +423,7 @@ function ZipToGitTerminal() {
           <span className="text-slate-200 truncate">Upload files via ZiptoGit</span>
           <span className={`text-slate-400${stage >= 3 ? "" : " invisible"}`}>a1b2c3d</span>
         </div>
-        <span style={{ animation: "ztg-blink 1s steps(1) infinite" }} className="inline-block w-2 h-4 bg-slate-300 align-middle" />
+        <span style={finished ? undefined : { animation: "ztg-blink 1s steps(1) infinite" }} className="inline-block w-2 h-4 bg-slate-300 align-middle" />
       </div>
       <div className="flex items-center justify-between px-4 py-3 border-t border-white/10">
         {TERMINAL_STAGES.map((label, i) => {
