@@ -74,11 +74,21 @@ describe("authenticated route protection", () => {
 });
 
 describe("/api/auth/url", () => {
-  it("builds a GitHub OAuth URL with the repo + delete_repo scopes", async () => {
+  it("requests repo access during ordinary sign-in", async () => {
     const res = await request(app).get("/api/auth/url");
     expect(res.status).toBe(200);
     expect(res.body.url).toContain("https://github.com/login/oauth/authorize");
-    expect(res.body.url).toContain("scope=repo+delete_repo");
+    expect(new URL(res.body.url).searchParams.get("scope")).toBe("repo");
+  });
+
+  it("requests deletion access only for an explicit authorization by a signed-in user", async () => {
+    const path = "/api/auth/url?intent=delete-repo";
+    const unauthorized = await request(app).get(path);
+    expect(unauthorized.status).toBe(401);
+
+    const authorized = await request(app).get(path).set("Cookie", signedCookie("gh_session", "original-token"));
+    expect(authorized.status).toBe(200);
+    expect(new URL(authorized.body.url).searchParams.get("scope")).toBe("repo delete_repo");
   });
 
   it("ignores a client-supplied state and generates its own instead", async () => {
@@ -97,7 +107,7 @@ describe("/api/auth/url", () => {
     expect(setCookie).toContain(encodeURIComponent(`s:${state}.`));
     expect(setCookie).toContain("HttpOnly");
     expect(setCookie).toContain("Path=/auth/callback");
-    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(res.headers["cache-control"]).toBe("private, no-store");
   });
 });
 
@@ -161,6 +171,25 @@ describe("/auth/callback", () => {
     expect(res.text).toMatch(/invalid or expired/i);
   });
 
+  it("rejects a deletion authorization if the session changed while the popup was open", async () => {
+    const authorization = await request(app)
+      .get("/api/auth/url?intent=delete-repo")
+      .set("Cookie", signedCookie("gh_session", "first-session"));
+    const state = new URL(authorization.body.url).searchParams.get("state");
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+    try {
+      const callback = await request(app)
+        .get("/auth/callback?code=upgrade-code&state=" + state)
+        .set("Cookie", [...getSetCookies(authorization), signedCookie("gh_session", "second-session")]);
+      expect(callback.status).toBe(400);
+      expect(callback.headers["cache-control"]).toBe("private, no-store");
+      expect(upstream).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("rejects a callback with no oauth_state cookie at all", async () => {
     const res = await request(app).get("/auth/callback?code=some-code&state=anything");
     expect(res.status).toBe(400);
@@ -216,6 +245,7 @@ describe("has_session flag cookie", () => {
     expect(flag).toMatch(/^has_session=1;/);
     expect(flag).not.toContain("HttpOnly");
     expect(flag).not.toContain("gho_test_token");
+    expect(findCookie(res, "gh_delete_permission")).toMatch(/^gh_delete_permission=;/);
   });
 
   it("is added to a page request that carries a valid session but no flag (sessions from before the flag existed)", async () => {
@@ -262,6 +292,38 @@ describe("has_session flag cookie", () => {
     expect(res.status).toBe(200);
     expect(findCookie(res, "gh_session")).toMatch(/^gh_session=;/);
     expect(findCookie(res, "has_session")).toMatch(/^has_session=;/);
+  });
+});
+
+describe("revoking GitHub access on disconnect", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each([204, 404])("clears session cookies when GitHub responds with %s", async (status) => {
+    const revoke = vi.fn().mockResolvedValue({ status });
+    vi.stubGlobal("fetch", revoke);
+    const res = await request(app).post("/api/logout").set("Cookie", signedCookie("gh_session", "token-to-revoke"));
+    expect(res.status).toBe(200);
+    expect(res.headers["cache-control"]).toBe("private, no-store");
+    expect(revoke).toHaveBeenCalledWith("https://api.github.com/applications/test_client_id/token", expect.objectContaining({
+      method: "DELETE",
+      body: JSON.stringify({ access_token: "token-to-revoke" }),
+      headers: expect.objectContaining({
+        Authorization: "Basic " + Buffer.from("test_client_id:test_client_secret").toString("base64"),
+      }),
+    }));
+    for (const name of ["gh_session", "has_session", "gh_delete_permission"]) {
+      expect(findCookie(res, name)).toMatch(new RegExp("^" + name + "=;"));
+    }
+  });
+
+  it("keeps the session available to retry if GitHub fails to revoke it", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 503 }));
+    const res = await request(app).post("/api/logout").set("Cookie", signedCookie("gh_session", "active-token"));
+    expect(res.status).toBe(502);
+    expect(res.headers["cache-control"]).toBe("private, no-store");
+    expect(getSetCookies(res)).toEqual([]);
   });
 });
 

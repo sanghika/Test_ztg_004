@@ -72,6 +72,43 @@ describe("GitHub error logging", () => {
   });
 });
 
+describe("separate deletion authorization", () => {
+  it.each([
+    { login: "octocat", scope: "repo,delete_repo", expected: 200 },
+    { login: "different-account", scope: "repo,delete_repo", expected: 403 },
+    { login: "octocat", scope: "repo", expected: 403 },
+  ])("sets deletion permission only for the same account with the granted scope ($expected)", async ({ login, scope, expected }) => {
+    const browser = request.agent(app);
+    const authorization = await browser.get("/api/auth/url?intent=delete-repo").set("Cookie", session().join("; "));
+    const state = new URL(authorization.body.url).searchParams.get("state");
+    mocks.fetchUser.mockImplementation(async (token: string) => ({ login: token === "tok" ? "octocat" : login, avatar_url: "" }));
+    const upstream = vi.fn()
+      .mockResolvedValueOnce({ json: async () => ({ access_token: "upgraded-token", scope }) })
+      .mockResolvedValueOnce({ status: 204 });
+    vi.stubGlobal("fetch", upstream);
+    try {
+      const response = await browser.get("/auth/callback?code=upgrade-code&state=" + state).set("Cookie", session().join("; "));
+      expect(response.status).toBe(expected);
+      const raw = response.headers["set-cookie"];
+      const cookies = Array.isArray(raw) ? raw : [raw];
+      const grant = cookies.find((cookie: string) => cookie?.startsWith("gh_delete_permission="));
+      const token = cookies.find((cookie: string) => cookie?.startsWith("gh_session="));
+      if (expected === 200) {
+        expect(grant).toContain("HttpOnly");
+        expect(token).toContain(encodeURIComponent("s:upgraded-token."));
+        expect(upstream).toHaveBeenCalledTimes(2);
+        expect(upstream.mock.calls[1][1].body).toBe(JSON.stringify({ access_token: "tok" }));
+      } else {
+        expect(grant).toBeUndefined();
+        expect(token).toBeUndefined();
+        expect(upstream).toHaveBeenCalledTimes(1);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("GET /api/bootstrap", () => {
   it("requires a session", async () => {
     expect((await request(app).get("/api/bootstrap")).status).toBe(401);
@@ -84,7 +121,9 @@ describe("GET /api/bootstrap", () => {
       user: { login: "octocat", avatar_url: "https://a/1" },
       repos: [{ id: 1, name: "r1", full_name: "octocat/r1" }],
       nextPage: 2,
+      canDeleteRepository: false,
     });
+    expect(res.headers["cache-control"]).toBe("private, no-store");
     expect(mocks.fetchRepositoryPage).toHaveBeenCalledTimes(1);
     expect(mocks.fetchRepositoryPage).toHaveBeenCalledWith("tok", 1);
   });
@@ -160,17 +199,36 @@ describe("repository changes", () => {
     expect(mocks.fetchRepositoryPage).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps full-repository deletion disabled without permission for the current token", async () => {
+    const otherToken = crypto.createHash("sha256").update("other-token").digest("hex");
+    const res = await request(app).delete("/api/repo")
+      .set("Cookie", [...session(), signedCookie("gh_delete_permission", otherToken)])
+      .send({ owner: "octocat", repo: "r1" });
+    expect(res.status).toBe(403);
+    expect(res.headers["cache-control"]).toBe("private, no-store");
+    expect(mocks.deleteRepository).not.toHaveBeenCalled();
+  });
+
   it("deleting a repo drops the cached list", async () => {
     mocks.deleteRepository.mockResolvedValue(undefined);
     await request(app).get("/api/bootstrap").set("Cookie", session());
-    await request(app).delete("/api/repo").set("Cookie", session()).send({ owner: "octocat", repo: "r1" });
+    const fingerprint = crypto.createHash("sha256").update("tok").digest("hex");
+    const res = await request(app).delete("/api/repo")
+      .set("Cookie", [...session(), signedCookie("gh_delete_permission", fingerprint)])
+      .send({ owner: "octocat", repo: "r1" });
+    expect(res.status).toBe(200);
     await request(app).get("/api/bootstrap").set("Cookie", session());
     expect(mocks.fetchRepositoryPage).toHaveBeenCalledTimes(2);
   });
 
   it("logging out drops the cached data", async () => {
     await request(app).get("/api/bootstrap").set("Cookie", session());
-    await request(app).post("/api/logout").set("Cookie", session());
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 204 }));
+    try {
+      expect((await request(app).post("/api/logout").set("Cookie", session())).status).toBe(200);
+    } finally {
+      vi.unstubAllGlobals();
+    }
     await request(app).get("/api/bootstrap").set("Cookie", session());
     expect(mocks.fetchUser).toHaveBeenCalledTimes(2);
   });

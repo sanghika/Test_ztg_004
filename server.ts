@@ -14,6 +14,11 @@ import { readAuthConfig, readPort } from "./server/config";
 import { findPublicPage, NOT_FOUND_PAGE, PRERENDER_ROUTES } from "./src/routes";
 
 const TOKEN_COOKIE = "gh_session";
+const DELETE_PERMISSION_COOKIE = "gh_delete_permission";
+const tokenFingerprint = (token: string) => crypto.createHash("sha256").update(token).digest("hex");
+
+const canDeleteRepository = (req: express.Request, token: string): boolean =>
+  req.signedCookies?.[DELETE_PERMISSION_COOKIE] === tokenFingerprint(token);
 const oauthStateCookie = (state: string) => `oauth_state_${state}`;
 const OAUTH_CALLBACK_PATH = "/auth/callback";
 // A readable (NOT HttpOnly) companion to the session cookie. It holds only "1"
@@ -81,6 +86,11 @@ export async function createApp() {
     next();
   });
 
+  app.use(["/api", OAUTH_CALLBACK_PATH], (_req, res, next) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    next();
+  });
+
   // --- Rate limiting --- //
   // Tuned per endpoint cost: OAuth/auth routes are cheap targets for abuse,
   // read endpoints are hit often during normal use, and write/destructive
@@ -114,7 +124,7 @@ export async function createApp() {
     handler: rateLimitHandler,
   });
 
-  app.use(["/api/auth/url", "/auth/callback"], authLimiter);
+  app.use(["/api/auth/url", "/auth/callback", "/api/logout"], authLimiter);
   app.use(["/api/me", "/api/bootstrap", "/api/repo-tree"], readLimiter);
   // "/api/repos" is dual-purpose (GET list / POST create), so it needs to pick
   // its limiter by method rather than being lumped into one blanket app.use.
@@ -175,9 +185,20 @@ export async function createApp() {
   const clearSessionFlag = (res: express.Response) => {
     res.clearCookie(SESSION_FLAG_COOKIE, { path: "/" });
   };
-  const setSessionCookie = (res: express.Response, token: string) => {
-    res.cookie(TOKEN_COOKIE, token, { ...sessionCookieBase, httpOnly: true, signed: true });
+  const setSessionCookie = (res: express.Response, token: string, allowDelete: boolean) => {
+    const privateCookie = { ...sessionCookieBase, httpOnly: true, signed: true };
+    res.cookie(TOKEN_COOKIE, token, privateCookie);
+    if (allowDelete) {
+      res.cookie(DELETE_PERMISSION_COOKIE, tokenFingerprint(token), privateCookie);
+    } else {
+      res.clearCookie(DELETE_PERMISSION_COOKIE, { path: "/" });
+    }
     setSessionFlag(res);
+  };
+  const clearSession = (res: express.Response) => {
+    res.clearCookie(TOKEN_COOKIE, { path: "/" });
+    res.clearCookie(DELETE_PERMISSION_COOKIE, { path: "/" });
+    clearSessionFlag(res);
   };
 
   // Sessions created before the flag existed have gh_session but no has_session.
@@ -216,7 +237,35 @@ export async function createApp() {
 
   // --- OAuth --- //
 
+  // Revoke only this token. Deleting the entire OAuth app grant would also
+  // disconnect other tokens the account uses on other devices.
+  const revokeGitHubToken = async (token: string): Promise<void> => {
+    const credentials = Buffer.from(clientId + ":" + clientSecret).toString("base64");
+    const response = await fetch("https://api.github.com/applications/" + encodeURIComponent(clientId) + "/token", {
+      method: "DELETE",
+      headers: {
+        "Authorization": "Basic " + credentials,
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      body: JSON.stringify({ access_token: token }),
+      redirect: "error",
+      signal: AbortSignal.timeout(10_000),
+    });
+    // GitHub returns 404 for a token that has already been revoked.
+    if (response.status !== 204 && response.status !== 404) {
+      throw new Error("GitHub could not revoke the token.");
+    }
+    sessionData.invalidate(token);
+  };
+
   app.get("/api/auth/url", (req, res) => {
+    const allowDelete = req.query.intent === "delete-repo";
+    const currentToken = req.signedCookies?.[TOKEN_COOKIE];
+    if (allowDelete && typeof currentToken !== "string") {
+      return res.status(401).json({ message: "Connect to GitHub before authorizing repository deletion." });
+    }
     // The state value is generated server-side and bound to a signed,
     // HttpOnly cookie rather than trusted from the client. /auth/callback
     // validates the returned state against this cookie before exchanging
@@ -226,8 +275,8 @@ export async function createApp() {
     const state = crypto.randomBytes(16).toString("hex");
     // Each attempt has a separate cookie so simultaneous tabs can complete
     // in any order, even when both requested their URLs at the same time.
-    res.setHeader("Cache-Control", "no-store");
-    res.cookie(oauthStateCookie(state), state, {
+    const stateValue = allowDelete ? state + ":" + tokenFingerprint(currentToken) : state;
+    res.cookie(oauthStateCookie(state), stateValue, {
       httpOnly: true,
       secure: isProd,
       sameSite: "lax",
@@ -238,7 +287,7 @@ export async function createApp() {
     const params = new URLSearchParams({
       client_id: clientId,
       redirect_uri: redirectUri,
-      scope: "repo delete_repo", // "repo" for read/write access; "delete_repo" is required to delete repositories
+      scope: allowDelete ? "repo delete_repo" : "repo",
       state,
     });
     const authUrl = `https://github.com/login/oauth/authorize?${params.toString()}`;
@@ -246,13 +295,17 @@ export async function createApp() {
   });
 
   app.get(["/auth/callback", "/auth/callback/"], async (req, res) => {
-    const code = req.query.code as string;
+    const code = req.query.code;
     const state = req.query.state;
     if (typeof state !== "string" || !/^[0-9a-f]{32}$/.test(state)) {
       return res.status(400).send("Invalid or expired authentication request. Please try signing in again.");
     }
     const cookieName = oauthStateCookie(state);
-    if (req.signedCookies?.[cookieName] === state) {
+    const stateValue = req.signedCookies?.[cookieName];
+    const currentToken = req.signedCookies?.[TOKEN_COOKIE];
+    const upgradeToken = typeof currentToken === "string" && stateValue === state + ":" + tokenFingerprint(currentToken)
+      ? currentToken : null;
+    if (stateValue === state || upgradeToken !== null) {
       res.clearCookie(cookieName, { path: OAUTH_CALLBACK_PATH });
     } else if (req.signedCookies?.oauth_state === state) {
       // Let an attempt started before a deploy finish with its old cookie.
@@ -261,13 +314,18 @@ export async function createApp() {
       return res.status(400).send("Invalid or expired authentication request. Please try signing in again.");
     }
 
-    if (!code) {
+    if (req.query.error === "access_denied") {
+      return res.status(400).type("text/plain").send("GitHub authorization was canceled. You can close this window.");
+    }
+    if (typeof code !== "string" || !code) {
       return res.status(400).send("No code provided.");
     }
 
     try {
       const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
         method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000),
         headers: {
           "Content-Type": "application/json",
           "Accept": "application/json"
@@ -280,12 +338,28 @@ export async function createApp() {
         })
       });
 
-      const tokenData = await tokenResponse.json() as { access_token?: string, error_description?: string };
+      const tokenData = await tokenResponse.json() as { access_token?: string; scope?: string };
+      const token = tokenData.access_token;
 
-      if (tokenData.access_token) {
+      if (typeof token === "string" && token) {
+        if (upgradeToken !== null) {
+          if (typeof tokenData.scope !== "string" || !tokenData.scope.split(/[,\s]+/).includes("delete_repo")) {
+            return res.status(403).type("text/plain").send("GitHub did not grant repository deletion access. You can close this window and keep using ZiptoGit.");
+          }
+          if (token !== upgradeToken) {
+            const [previous, upgraded] = await Promise.all([
+              githubService.fetchUser(upgradeToken),
+              githubService.fetchUser(token),
+            ]);
+            if (previous.login.toLowerCase() !== upgraded.login.toLowerCase()) {
+              return res.status(403).type("text/plain").send("Use the same GitHub account that is connected to ZiptoGit.");
+            }
+            await revokeGitHubToken(upgradeToken);
+          }
+        }
         // The token is set as an HttpOnly cookie the browser can never read via JS,
         // and is never included in the postMessage payload sent to the opener window.
-        setSessionCookie(res, tokenData.access_token);
+        setSessionCookie(res, token, upgradeToken !== null);
         res.send(`
           <html>
             <body>
@@ -306,18 +380,21 @@ export async function createApp() {
           </html>
         `);
       } else {
-        res.status(400).send(`Authentication failed: ${tokenData.error_description || JSON.stringify(tokenData)}`);
+        res.status(400).type("text/plain").send("GitHub did not complete the authorization. Close this window and try again.");
       }
-    } catch (error) {
-      res.status(500).send(`Authentication error: ${error instanceof Error ? error.message : "Unknown error"}`);
+    } catch {
+      res.status(502).type("text/plain").send("Could not complete GitHub authorization. Close this window and try again.");
     }
   });
 
-  app.post("/api/logout", (req, res) => {
-    const token = (req as any).signedCookies?.[TOKEN_COOKIE];
-    if (token) sessionData.invalidate(token);
-    res.clearCookie(TOKEN_COOKIE, { path: "/" });
-    clearSessionFlag(res);
+  app.post("/api/logout", async (req, res) => {
+    const token = req.signedCookies?.[TOKEN_COOKIE];
+    try {
+      if (typeof token === "string") await revokeGitHubToken(token);
+    } catch {
+      return res.status(502).json({ message: "Could not disconnect from GitHub. Try again." });
+    }
+    clearSession(res);
     res.json({ ok: true });
   });
 
@@ -341,7 +418,8 @@ export async function createApp() {
   // loads any further pages afterwards with GET /api/repos?page=N.
   app.get("/api/bootstrap", requireAuth, async (req, res) => {
     try {
-      res.json(await sessionData.bootstrap((req as any).ghToken));
+      const token = (req as any).ghToken;
+      res.json({ ...await sessionData.bootstrap(token), canDeleteRepository: canDeleteRepository(req, token) });
     } catch (err: any) {
       handleGithubError(err, res);
     }
@@ -393,7 +471,11 @@ export async function createApp() {
     try {
       const { owner, repo } = req.body || {};
       if (!owner || !repo) return res.status(400).json({ message: "owner and repo are required." });
-      await githubService.deleteRepository((req as any).ghToken, owner, repo);
+      const token = (req as any).ghToken;
+      if (!canDeleteRepository(req, token)) {
+        return res.status(403).json({ message: "Authorize repository deletion with GitHub first." });
+      }
+      await githubService.deleteRepository(token, owner, repo);
       sessionData.invalidate((req as any).ghToken); // the cached list still includes it
       res.json({ ok: true });
     } catch (err: any) {
@@ -479,7 +561,6 @@ export async function createApp() {
       return res.status(400).json({ message: "One or more paths are invalid." });
     }
     res.setHeader("Content-Type", "application/x-ndjson");
-    res.setHeader("Cache-Control", "no-cache");
     try {
       const commit = await githubService.deleteRepoPaths(
         (req as any).ghToken,
@@ -513,8 +594,7 @@ export async function createApp() {
     if (status === 401) {
       // GitHub rejected the token (revoked or expired): the session is dead.
       // Clearing both cookies stops the flag from being re-issued for it.
-      res.clearCookie(TOKEN_COOKIE, { path: "/" });
-      clearSessionFlag(res);
+      clearSession(res);
     }
     const message = err?.response?.data?.message || err?.message || "GitHub API error.";
     res.status(status).json({ message });

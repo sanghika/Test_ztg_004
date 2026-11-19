@@ -30,7 +30,7 @@ Push ZIP archives directly to GitHub repositories without Git CLI.
 | `TRUST_PROXY_HOPS` | No | How many proxies sit in front of the app in production (default `1`: the host's load balancer). Set `2` if you add a CDN such as Cloudflare in front of it, so rate limits still see each visitor's own IP. Never set it higher than the real number of proxies |
 | `VITE_GA_MEASUREMENT_ID` | No | GA4 measurement ID (`G-…`). Read at **build** time (`npm run build`), not at runtime, so set it where the build runs. Unset, or not a valid `G-…` ID: no analytics script is loaded and no event is sent. When set, Google Analytics loads after the page has loaded, in production builds only |
 
-**Security note:** the browser stores the GitHub access token in a signed HttpOnly session cookie that page scripts cannot read. All GitHub API calls run through the server (`server/githubService.ts`). If you're upgrading from an older version of this app, existing users will need to disconnect and reconnect their GitHub account once, both to migrate off client-stored tokens and to grant the `delete_repo` OAuth scope used by the delete-repository feature.
+**Security note:** the browser stores the GitHub access token in a signed HttpOnly session cookie that page scripts cannot read. All GitHub API calls run through the server (`server/githubService.ts`). Sign-in requests the `repo` scope. The Manage files view asks for the `delete_repo` scope when a user authorizes repository deletion. Disconnect revokes the current session token on GitHub.
 
 ## Build and run
 

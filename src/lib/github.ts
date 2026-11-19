@@ -289,6 +289,7 @@ async function readNdjsonStream<T>(
 
 // What GET /api/bootstrap returns: the user plus the FIRST page of repositories.
 export interface BootstrapData {
+  canDeleteRepository: boolean;
   user: { login: string; avatar_url: string };
   repos: RepoSummary[];
   /** Next page to request with fetchRepositories(), or null when there is none. */

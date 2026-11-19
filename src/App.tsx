@@ -379,9 +379,9 @@ function PrivacyPage() {
         <h1 className={`${T.h1} text-ink dark:text-white mb-6`}>Privacy policy</h1>
         <p className="mb-4 text-sm text-muted">Last updated: {PRIVACY_LAST_UPDATED}</p>
         <h2 className={`${T.h2} mt-6 mb-3`}>1. Information we collect</h2>
-        <p className="mb-4">ZiptoGit requests GitHub OAuth repository access to read and push files to repositories you can access, including private repositories. It also requests the <code>delete_repo</code> permission for the Delete repository feature. This feature asks you to confirm before deleting a repository. We do not store your repository contents or your source code on our servers.</p>
+        <p className="mb-4">ZiptoGit requests GitHub OAuth repository access to read and push files to repositories you can access, including private repositories. If you choose to authorize repository deletion, ZiptoGit requests the <code>delete_repo</code> permission from GitHub. This feature asks you to confirm before deleting a repository. We do not store your repository contents or your source code on our servers.</p>
         <h2 className={`${T.h2} mt-6 mb-3`}>2. How we use information</h2>
-        <p className="mb-4">Your browser stores your GitHub access token in a signed HttpOnly session cookie. HttpOnly prevents page scripts from reading it. The server uses the cookie to make GitHub API requests on your behalf. The cookie expires after 30 days or is cleared when you disconnect.</p>
+        <p className="mb-4">Your browser stores your GitHub access token in a signed HttpOnly session cookie. HttpOnly prevents page scripts from reading it. The server uses the cookie to make GitHub API requests on your behalf. The cookie expires after 30 days. If you disconnect, ZiptoGit revokes the session token on GitHub and clears the cookie.</p>
         <h2 className={`${T.h2} mt-6 mb-3`}>3. Third-party services</h2>
         <p className="mb-4">We use Google Analytics to monitor usage and improve the tool. We do not sell your data.</p>
       </div>
@@ -466,7 +466,7 @@ function FAQPage() {
   const faqs = [
     { q: "How are my files and GitHub token handled?", a: `ZiptoGit extracts your ZIP in your browser. ${SECRET_SCAN_NOTE} The server sends your files to GitHub using the access token from your browser’s HttpOnly session cookie.` },
     { q: "What can I upload?", a: `You can upload a ZIP archive or select a project folder on desktop. The total limit for files is ${uploadLimitMiB} MiB after ZIP extraction.` },
-    { q: "Which GitHub permissions does ZiptoGit request?", a: "ZiptoGit requests the repo permission to read and push files in repositories you can access, including private repositories. It also requests delete_repo for the Delete repository feature, which asks you to confirm before deleting a repository." },
+    { q: "Which GitHub permissions does ZiptoGit request?", a: "ZiptoGit requests the repo permission to read and push files in repositories you can access, including private repositories. If you authorize repository deletion, ZiptoGit asks GitHub for the separate delete_repo permission. You must still confirm the repository name before deleting it." },
     { q: "What does ZiptoGit cost?", a: "It is currently completely free to use." },
     { q: "Can I use it for private repositories?", a: "Yes. You can upload files to a private repository if your GitHub account has permission to commit to it." }
   ];

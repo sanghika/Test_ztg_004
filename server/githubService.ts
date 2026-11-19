@@ -96,7 +96,7 @@ export const deleteRepository = async (token: string, owner: string, repo: strin
     if (status === 403 && /scope/i.test(apiMessage)) {
       throw new Error(
         "Your GitHub connection doesn't have permission to delete repositories. " +
-        "Please disconnect and reconnect your GitHub account to grant the required access, then try again."
+        "Authorize repository deletion with GitHub before trying again."
       );
     }
     throw error;
