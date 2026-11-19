@@ -71,6 +71,25 @@ class PublicRoutes(unittest.TestCase):
         expect(page).to_have_title("ZiptoGit - Push ZIP Archives Directly to GitHub")
         self.assertEqual(previous_scroll, page.evaluate("scrollY"))
 
+    def test_uploader_loads_only_when_navigating_to_home(self):
+        page = self.browser.new_page()
+        self.addCleanup(page.close)
+        page.goto(f"{ORIGIN}/faq")
+        self.assertFalse(page.evaluate(
+            "performance.getEntriesByType('resource').some(entry => entry.name.includes('/ZipUploader-'))"
+        ))
+        page.evaluate("window.startedOnFaq = true")
+        with page.expect_response("**/assets/ZipUploader-*.js"):
+            page.get_by_role("link", name="ZiptoGit").click()
+        heading = page.get_by_role("heading", name="Upload a ZIP file to GitHub")
+        expect(heading).to_be_focused()
+        expect(page.get_by_role("button", name="Connect GitHub")).to_be_visible()
+        self.assertTrue(page.evaluate("window.startedOnFaq"))
+
+        page.reload()
+        self.assertEqual(1, page.locator('link[rel="modulepreload"][href*="/ZipUploader-"]').count())
+        expect(heading).to_be_visible()
+
     def test_mobile_escape_returns_focus_to_menu_button(self):
         page = self.browser.new_page(viewport={"width": 390, "height": 844})
         self.addCleanup(page.close)

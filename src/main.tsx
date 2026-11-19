@@ -1,4 +1,4 @@
-import {StrictMode} from 'react';
+import {StrictMode, lazy} from 'react';
 import {createRoot, hydrateRoot} from 'react-dom/client';
 import App from './App.tsx';
 import {findPublicPage, NOT_FOUND_PAGE} from './routes';
@@ -9,9 +9,10 @@ import { reportWebVitals } from './lib/reportWebVitals';
 void reportWebVitals().catch(() => {});
 
 const container = document.getElementById('root')!;
+const ZipUploader = lazy(() => import('./ZipUploader'));
 const app = (
   <StrictMode>
-    <App />
+    <App Uploader={ZipUploader} />
   </StrictMode>
 );
 
