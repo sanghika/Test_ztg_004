@@ -236,6 +236,22 @@ describe("commitUpload", () => {
     );
   });
 
+  it.each([
+    ["branch read", mockGetRef, 503, "GitHub unavailable"],
+    ["unrelated conflict", mockGetRef, 409, "Another request changed the branch"],
+    ["commit read", mockGetCommit, 409, "Git Repository is empty."],
+  ] as const)("does not initialize a repository after a failed %s", async (_label, mock, status, message) => {
+    mockReposGet.mockResolvedValue({ data: { default_branch: "main" } });
+    mockGetRef.mockResolvedValue({ data: { object: { sha: "existing-commit-sha" } } });
+    const error = Object.assign(new Error(message), { status });
+    mock.mockRejectedValueOnce(error);
+
+    await expect(commitUpload("fake-token", "me", "repo", blobs, "Upload files")).rejects.toBe(error);
+    expect(mockCreateOrUpdateFileContents).not.toHaveBeenCalled();
+    expect(mockCreateTree).not.toHaveBeenCalled();
+    expect(mockUpdateRef).not.toHaveBeenCalled();
+  });
+
   it("finalizes against the branch an empty-repo init created — updateRef, not createRef", async () => {
     mockReposGet.mockResolvedValue({ data: { default_branch: "main" } });
     mockGetRef.mockRejectedValueOnce(Object.assign(new Error("Git Repository is empty."), { status: 409 }));

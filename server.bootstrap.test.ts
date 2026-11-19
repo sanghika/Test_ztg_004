@@ -9,6 +9,7 @@ const { mocks } = vi.hoisted(() => ({
     fetchUser: vi.fn(),
     fetchRepositoryPage: vi.fn(),
     createRepository: vi.fn(),
+    commitUpload: vi.fn(),
     deleteRepository: vi.fn(),
   },
 }));
@@ -43,6 +44,32 @@ beforeEach(async () => {
     nextPage: page < 2 ? page + 1 : null,
   }));
   app = await createApp(); // a fresh app means a fresh cache
+});
+
+describe("GitHub error logging", () => {
+  it("logs safe metadata without logging upload contents or GitHub error details", async () => {
+    const content = "private file contents";
+    mocks.commitUpload.mockRejectedValueOnce(Object.assign(new Error(content), {
+      status: 403,
+      request: { body: { content } },
+      response: { headers: { "x-github-request-id": "ABC:123" }, data: { message: "Permission denied" } },
+    }));
+
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await request(app)
+        .post("/api/upload/commit")
+        .set("Cookie", session())
+        .send({ owner: "octocat", repo: "r1", entries: [{ path: "a.txt", content }] });
+      expect(res.status).toBe(403);
+      expect(res.body.message).toBe("Permission denied");
+      expect(log.mock.calls).toEqual([
+        ["GitHub request failed", { method: "POST", route: "/api/upload/commit", status: 403, requestId: "ABC:123" }],
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
 });
 
 describe("GET /api/bootstrap", () => {

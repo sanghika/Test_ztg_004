@@ -220,6 +220,22 @@ export const fetchRepoTree = async (
   return listBranch(repoData.default_branch || "main");
 };
 
+// GitHub's Git Data API reports an empty repository with this specific 409.
+const isEmptyRepoError = (err: any): boolean => {
+  const message = err?.response?.data?.message ?? err?.message;
+  return err?.status === 409 && typeof message === "string" && /^Git Repository is empty\.?$/i.test(message.trim());
+};
+
+const readBranchHead = async (octokit: Octokit, owner: string, repo: string, branch: string): Promise<string | null> => {
+  try {
+    const { data } = await octokit.rest.git.getRef({ owner, repo, ref: "heads/" + branch });
+    return data.object.sha;
+  } catch (error) {
+    if (isEmptyRepoError(error)) return null;
+    throw error;
+  }
+};
+
 // What deleting needs: the default branch, the commit it points at (so the
 // commit that follows is built on exactly what was listed) and the COMPLETE
 // tree. Unlike the browse list, a truncated listing is completed here.
@@ -231,33 +247,24 @@ const readHeadTree = async (
   const { data: repoData } = await octokit.rest.repos.get({ owner, repo });
   const defaultBranch = repoData.default_branch || "main";
 
-  let refData;
-  try {
-    ({ data: refData } = await octokit.rest.git.getRef({
-      owner,
-      repo,
-      ref: `heads/${defaultBranch}`,
-    }));
-  } catch {
-    // A repo with zero commits has no ref to read.
-    return { tree: [], defaultBranch, headSha: null };
-  }
+  const headSha = await readBranchHead(octokit, owner, repo, defaultBranch);
+  if (!headSha) return { tree: [], defaultBranch, headSha: null };
 
   const { data: treeData } = await octokit.rest.git.getTree({
     owner,
     repo,
-    tree_sha: refData.object.sha,
+    tree_sha: headSha,
     recursive: "true",
   });
 
   const tree = treeData.truncated
-    ? await walkTree(octokit, owner, repo, refData.object.sha)
+    ? await walkTree(octokit, owner, repo, headSha)
     : toTreeEntries(treeData.tree);
 
   // Exposing the ref SHA we already fetched lets callers (e.g. deleteRepoPaths)
   // avoid a redundant getRef round trip — and the TOCTOU window that comes
   // with reading the ref twice.
-  return { tree, defaultBranch, headSha: refData.object.sha };
+  return { tree, defaultBranch, headSha };
 };
 
 export const deleteRepoPaths = async (
@@ -358,26 +365,10 @@ const resolveHead = async (octokit: Octokit, owner: string, repo: string) => {
   const defaultBranch = repoData.default_branch || "main";
   const branchRef = `heads/${defaultBranch}`;
 
-  let commitSha = "";
-  let baseTreeSha = "";
-
-  try {
-    const { data: refData } = await octokit.rest.git.getRef({ owner, repo, ref: branchRef });
-    commitSha = refData.object.sha;
-
-    const { data: commitData } = await octokit.rest.git.getCommit({ owner, repo, commit_sha: commitSha });
-    baseTreeSha = commitData.tree.sha;
-  } catch (e: any) {
-    // A brand-new repo with zero commits has no ref to read yet. GitHub's Git
-    // Data API (the blob/tree/commit/ref calls used below) returns 409 "Git
-    // Repository is empty" for EVERY one of those endpoints on a repo in this
-    // state, not just this one — confirmed by GitHub's own docs:
-    // https://docs.github.com/en/rest/guides/using-the-rest-api-to-interact-with-your-git-database
-    // The documented way around it is to make one initial commit through the
-    // simpler Contents API first, which is allowed to touch an empty repo and
-    // creates the branch. Everything after that behaves like a normal repo.
-    console.warn("Repository appears empty. Initializing via the Contents API before using the Git Data API.", e?.message);
-
+  let commitSha = await readBranchHead(octokit, owner, repo, defaultBranch);
+  if (commitSha === null) {
+    // The Contents API can create the first commit. Git Data API calls work
+    // once that first commit exists.
     const initReadme = `# ${repo}\n\nCreated with ZiptoGit.\n`;
     const { data: initData } = await octokit.rest.repos.createOrUpdateFileContents({
       owner,
@@ -392,11 +383,10 @@ const resolveHead = async (octokit: Octokit, owner: string, repo: string) => {
       throw new Error("Failed to initialize the empty repository (no commit SHA returned).");
     }
     commitSha = initData.commit.sha;
-    const { data: commitData } = await octokit.rest.git.getCommit({ owner, repo, commit_sha: commitSha });
-    baseTreeSha = commitData.tree.sha;
   }
 
-  return { branchRef, commitSha, baseTreeSha };
+  const { data: commitData } = await octokit.rest.git.getCommit({ owner, repo, commit_sha: commitSha });
+  return { branchRef, commitSha, baseTreeSha: commitData.tree.sha };
 };
 
 // GitHub's push protection can reject blobs and commits that contain a secret
@@ -439,11 +429,6 @@ const createBlobWithRetry = async (
     throw err;
   }
 };
-
-// GitHub's Git Data API answers every call with 409 "Git Repository is empty"
-// until the repository has a first commit (see resolveHead).
-const isEmptyRepoError = (err: any): boolean =>
-  err?.status === 409 && /empty/i.test(err?.response?.data?.message || err?.message || "");
 
 // How many blobs are being created at once. GitHub throttles bursts of
 // content-creating calls, so this stays modest.

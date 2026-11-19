@@ -23,11 +23,11 @@
     "@octokit/core": "^7.0.6",
     "@octokit/plugin-paginate-rest": "^14.0.0",
     "@octokit/plugin-rest-endpoint-methods": "^17.0.0",
-    "compression": "^1.7.5",
+    "compression": "^1.8.2",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.2.3",
-    "express": "^4.21.2",
-    "express-rate-limit": "^8.6.2",
+    "express": "^4.22.3",
+    "express-rate-limit": "^8.7.5",
     "jszip": "^3.10.1",
     "lucide-react": "^0.546.0",
     "react": "^19.0.1",
@@ -58,6 +58,13 @@
     "vitest": "^4.1.10"
   },
   "overrides": {
-    "body-parser": "^1.20.6"
+    "body-parser": "^1.20.9",
+    "express": {
+      "proxy-addr": "^2.0.8",
+      "qs": "^6.17.1"
+    },
+    "express-rate-limit": {
+      "ip-address": "^10.7.6"
+    }
   }
 }

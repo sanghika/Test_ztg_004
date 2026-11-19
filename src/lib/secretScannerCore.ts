@@ -46,13 +46,13 @@ export const BINARY_EXTENSIONS = new Set([
 export { MAX_SCAN_BYTES };
 
 // --- Secret detection patterns: [name, regex] --- //
-// Each regex should match the secret token itself so it can be redacted in place.
+// Assignment patterns capture the prefix so redaction preserves the key, separator, and opening quote.
 // Compiled once, when this module loads. They are shared between files, which
 // is safe because String.prototype.replace resets lastIndex of a global regex
 // before it starts; never call .test() or .exec() on these.
-export const SECRET_PATTERNS: { name: string; regex: RegExp }[] = [
+export const SECRET_PATTERNS: { name: string; regex: RegExp; preservePrefix?: boolean }[] = [
   { name: "AWS Access Key ID", regex: /\bAKIA[0-9A-Z]{16}\b/g },
-  { name: "AWS Secret Access Key", regex: /\b(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)\s*[:=]\s*["']?[A-Za-z0-9\/+=]{40}["']?/g },
+  { name: "AWS Secret Access Key", regex: /\b(aws_secret_access_key["']?\s*[:=]\s*["'\x60]?)[A-Za-z0-9\/+=]{40}/gi, preservePrefix: true },
   { name: "GitHub Token", regex: /\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,255}\b/g },
   { name: "Google API Key", regex: /\bAIza[0-9A-Za-z\-_]{35}\b/g },
   { name: "Stripe Key", regex: /\b(sk|rk|pk)_(live|test)_[0-9a-zA-Z]{16,247}\b/g },
@@ -62,7 +62,7 @@ export const SECRET_PATTERNS: { name: string; regex: RegExp }[] = [
   { name: "JWT", regex: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g },
   { name: "Firebase Server Key", regex: /\bAAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}\b/g },
   { name: "Twilio API Key", regex: /\bSK[0-9a-fA-F]{32}\b/g },
-  { name: "Generic API Key/Secret Assignment", regex: /\b((?:api|secret|access|client)[_-]?(?:key|token|secret))\s*[:=]\s*["']([A-Za-z0-9_\-\/+=]{16,})["']/gi },
+  { name: "Generic API Key/Secret Assignment", regex: /\b((?:api|secret|access|client)[_-]?(?:key|token|secret)["']?\s*[:=]\s*(["'\x60]))[A-Za-z0-9_\-\/+=]{16,}(?=\2)/gi, preservePrefix: true },
   { name: "Database Connection String", regex: /\b(postgres|postgresql|mysql|mongodb(?:\+srv)?):\/\/[^:\s]+:[^@\s]+@[^\s"'`]+/gi },
 ];
 
@@ -87,7 +87,7 @@ const DECODE_CHUNK_CHARS = 1 << 20;
  * is not valid base64; callers treat that as binary too.
  */
 export const base64ToText = (b64: string): string | null => {
-  const decoder = new TextDecoder("utf-8", { fatal: false });
+  const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
   const parts: string[] = [];
   for (let i = 0; i < b64.length; i += DECODE_CHUNK_CHARS) {
     const binary = atob(b64.slice(i, i + DECODE_CHUNK_CHARS));
@@ -141,11 +141,11 @@ export const scanContent = (base64: string): ScanOutcome => {
 
   let redactedText = text;
   const matches: string[] = [];
-  for (const { name, regex } of SECRET_PATTERNS) {
+  for (const { name, regex, preservePrefix } of SECRET_PATTERNS) {
     let matched = false;
-    redactedText = redactedText.replace(regex, () => {
+    redactedText = redactedText.replace(regex, (_match: string, prefix: string) => {
       matched = true;
-      return "[REDACTED-SECRET]";
+      return (preservePrefix ? prefix : "") + "[REDACTED-SECRET]";
     });
     if (matched) matches.push(name);
   }

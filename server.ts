@@ -498,8 +498,15 @@ export async function createApp() {
   });
 
   function handleGithubError(err: any, res: express.Response) {
-    console.error(err);
-    const status = err?.status && Number.isInteger(err.status) ? err.status : 500;
+    const status = Number.isInteger(err?.status) && err.status >= 400 && err.status < 600 ? err.status : 500;
+    const requestId = err?.response?.headers?.["x-github-request-id"];
+    // Octokit errors retain the original request options, including upload bodies.
+    console.error("GitHub request failed", {
+      method: res.req.method,
+      route: res.req.route.path,
+      status,
+      ...(typeof requestId === "string" && /^[0-9a-f:]{1,80}$/i.test(requestId) ? { requestId } : {}),
+    });
     if (status === 401) {
       // GitHub rejected the token (revoked or expired): the session is dead.
       // Clearing both cookies stops the flag from being re-issued for it.
@@ -507,7 +514,7 @@ export async function createApp() {
       clearSessionFlag(res);
     }
     const message = err?.response?.data?.message || err?.message || "GitHub API error.";
-    res.status(status >= 400 && status < 600 ? status : 500).json({ message });
+    res.status(status).json({ message });
   }
 
   // Turns Express's default opaque error page for an oversized request body
