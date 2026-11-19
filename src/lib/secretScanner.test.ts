@@ -1,3 +1,4 @@
+import { Script } from "node:vm";
 import { describe, it, expect, vi } from "vitest";
 import { sanitizeFiles } from "./secretScanner";
 import { MAX_SCAN_BYTES, scanContent } from "./secretScannerCore";
@@ -165,6 +166,25 @@ describe("sanitizeFiles - what is and is not scanned", () => {
 });
 
 describe("scanContent", () => {
+  it("redacts only assignment values and keeps JavaScript and JSON parseable", () => {
+    const value = "example-test-value-only";
+    const awsValue = "a".repeat(40);
+    const cases = [
+      { before: 'const apiKey = "' + value + '";', after: 'const apiKey = "[REDACTED-SECRET]";', parse: (code: string) => new Script(code) },
+      { before: "const AWS_SECRET_ACCESS_KEY = '" + awsValue + "';", after: "const AWS_SECRET_ACCESS_KEY = '[REDACTED-SECRET]';", parse: (code: string) => new Script(code) },
+      { before: JSON.stringify({ "clientSecret": value }), after: '{"clientSecret":"[REDACTED-SECRET]"}', parse: JSON.parse },
+      { before: "AWS_SECRET_ACCESS_KEY=" + awsValue, after: "AWS_SECRET_ACCESS_KEY=[REDACTED-SECRET]", parse: undefined },
+    ];
+    for (const { before, after, parse } of cases) {
+      const result = scanContent(b64(before));
+      expect(result.kind).toBe("redacted");
+      if (result.kind !== "redacted") continue;
+      const output = utf8(result.content);
+      expect(output).toBe(after);
+      if (parse) expect(() => parse(output)).not.toThrow();
+    }
+  });
+
   it("keeps multi-byte characters intact when a file is decoded in several slices", () => {
     // 900k two-byte characters is ~2.4MB of base64, more than two decode slices,
     // so characters straddle slice boundaries.

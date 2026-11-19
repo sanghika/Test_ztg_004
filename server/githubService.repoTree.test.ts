@@ -122,6 +122,15 @@ describe("deleteRepoPaths with a truncated tree", () => {
     mockUpdateRef.mockResolvedValue({});
   };
 
+  it("reports a failed branch lookup instead of treating the repository as empty", async () => {
+    arrangeRepo();
+    const error = apiError(503, "GitHub unavailable");
+    mockGetRef.mockRejectedValueOnce(error);
+
+    await expect(deleteRepoPaths("t", "o", "r", ["x"], "msg")).rejects.toBe(error);
+    expect(mockCreateTree).not.toHaveBeenCalled();
+  });
+
   it("walks the tree folder by folder so files past the cut-off are still deleted", async () => {
     arrangeRepo();
     // The recursive request is cut off and only knows about root.txt.
