@@ -4,7 +4,7 @@ import { renderToString } from "react-dom/server";
 import { StaticRouter } from "react-router-dom";
 import { AppRoutes } from "./App.tsx";
 
-export { PRERENDER_ROUTES, SITE_ORIGIN } from "./routes.ts";
+export { HOME_HEADING, PRERENDER_ROUTES, SITE_ORIGIN } from "./routes.ts";
 
 /** HTML for the app at `url`, to go inside <div id="root">. */
 export function render(url: string): string {

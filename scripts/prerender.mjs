@@ -23,7 +23,7 @@ const ssrDir = path.join(process.cwd(), "dist-ssr");
 
 const entry = ["entry-server.js", "entry-server.mjs"].map((f) => path.join(ssrDir, f)).find((f) => existsSync(f));
 if (!entry) throw new Error("prerender: dist-ssr/entry-server.js not found. Run `npm run build:ssr` first.");
-const { render, PRERENDER_ROUTES, SITE_ORIGIN } = await import(pathToFileURL(entry).href);
+const { render, HOME_HEADING, PRERENDER_ROUTES, SITE_ORIGIN } = await import(pathToFileURL(entry).href);
 
 // 200.html is the untouched Vite output. Reading it back when it exists makes
 // running this script twice harmless.
@@ -35,7 +35,7 @@ for (const route of PRERENDER_ROUTES) {
   const appHtml = render(route.path);
   if (!appHtml.includes("<h1")) throw new Error(`prerender: ${route.path} rendered without an <h1>`);
   // The whole point of the home page's prerender is that the hero is in the HTML.
-  if (route.path === "/" && !appHtml.includes("Connect your GitHub account")) {
+  if (route.path === "/" && !appHtml.includes(HOME_HEADING)) {
     throw new Error("prerender: the signed-out hero is missing from the prerendered home page");
   }
   const out = path.join(distDir, outputPathFor(route.path));
