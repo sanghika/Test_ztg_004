@@ -1127,7 +1127,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
                   {treeTruncated && (
                     <Alert variant="warning" className="mb-3">
                       This repository is too large for GitHub to list completely, so some files are not shown here.
-                      Deleting a folder still removes everything inside it.
+                      ZiptoGit checks the full folder before deleting it.
                     </Alert>
                   )}
                   <RepoFileTreeErrorBoundary key={selectedRepoFullId}>

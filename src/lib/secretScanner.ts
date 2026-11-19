@@ -107,7 +107,7 @@ export const sanitizeFiles = async (
     const finding = findings.get(index);
     if (finding?.kind === "redacted") {
       report.redactedFiles.push({ path: file.path, matches: finding.matches });
-      sanitized.push({ path: file.path, content: finding.content });
+      sanitized.push({ ...file, content: finding.content });
       return;
     }
     if (tooLarge.has(index) || finding?.kind === "too-large") report.unscannedFiles.push(file.path);

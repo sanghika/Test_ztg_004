@@ -2,6 +2,7 @@
 // workers/extract.worker.ts (normal path) and by extractZip in github.ts
 // (fallback when Web Workers are unavailable). Only types are imported from
 // jszip, so the caller decides how the library is loaded.
+import type { ExtractedFile } from "./github";
 import type JSZip from "jszip";
 import { MAX_TOTAL_UPLOAD_BYTES, MAX_SINGLE_FILE_BYTES } from "./uploadLimits";
 import { shouldSkipUploadPath } from "./uploadPaths";
@@ -55,7 +56,7 @@ function readZipFile(entry: JSZip.JSZipObject, path: string, bytesSoFar: number)
 
 export interface ZipExtractHooks {
   /** Called once per file, in archive order, after it passed the size checks. */
-  onFile: (path: string, base64Content: string) => void;
+  onFile: (file: ExtractedFile) => void;
   /** Give the event loop a turn between batches. Wanted on the main thread, pointless in a worker. */
   yieldBetweenBatches: boolean;
 }
@@ -98,7 +99,13 @@ export async function extractZipEntries(
     // One stream at a time lets every chunk enforce the remaining ZIP budget.
     const { base64, bytes } = await readZipFile(entry, path, totalBytes);
     totalBytes += bytes;
-    hooks.onFile(path, base64);
+    // JSZip exposes Unix mode bits when the archive provides them. A symlink's
+    // mode may include execute bits, but its contents are not an executable file.
+    const permission = entry.unixPermissions;
+    const mode = typeof permission === "string" ? Number.parseInt(permission, 8) : permission ?? 0;
+    const fileType = mode & 0o170000;
+    const executable = (fileType === 0 || fileType === 0o100000) && (mode & 0o111) !== 0;
+    hooks.onFile({ path, content: base64, ...(executable ? { executable } : {}) });
 
     if (hooks.yieldBetweenBatches && (i + 1) % 6 === 0) {
       await new Promise((resolve) => setTimeout(resolve, 0));

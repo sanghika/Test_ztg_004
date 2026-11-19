@@ -131,6 +131,20 @@ describe("deleteRepoPaths with a truncated tree", () => {
     expect(mockCreateTree).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])("blocks folder deletion when it contains a submodule (truncated=%s)", async (truncated) => {
+    arrangeRepo();
+    const submodule = { path: "nested", type: "commit", sha: "module-commit", mode: "160000" };
+    mockGetTree.mockResolvedValueOnce({ data: { truncated, tree: [
+      blob("src/a.txt"), ...(truncated ? [] : [{ ...submodule, path: "src/nested" }]),
+    ] } });
+    mockGetTree.mockResolvedValueOnce({ data: { tree: [tree("src", "src-tree")] } });
+    mockGetTree.mockResolvedValueOnce({ data: { tree: [blob("a.txt"), submodule] } });
+
+    await expect(deleteRepoPaths("t", "o", "r", ["src"], "msg")).rejects.toThrow(/includes a Git submodule/);
+    expect(mockCreateTree).not.toHaveBeenCalled();
+    expect(mockUpdateRef).not.toHaveBeenCalled();
+  });
+
   it("walks the tree folder by folder so files past the cut-off are still deleted", async () => {
     arrangeRepo();
     // The recursive request is cut off and only knows about root.txt.

@@ -122,15 +122,19 @@ export const isPathRemoved = (path: string, selectedPaths: string[]): boolean =>
     return path === sel || path.startsWith(sel + "/");
   });
 
-const toTreeEntries = (items: any[] | undefined): RepoTreeEntry[] =>
-  (items || [])
-    .filter((item) => item.type === "blob" || item.type === "tree")
-    .map((item) => ({
-      path: item.path as string,
-      type: item.type as "blob" | "tree",
-      sha: item.sha as string,
-      size: item.size,
-    }));
+type GitTreeItem = Awaited<ReturnType<Octokit["rest"]["git"]["getTree"]>>["data"]["tree"][number];
+type GitTreeEntry = Omit<RepoTreeEntry, "type"> & { type: "blob" | "tree" | "commit"; mode?: string };
+
+const toGitTreeEntries = (items: GitTreeItem[] = []): GitTreeEntry[] =>
+  items.flatMap(({ path, type, sha, size, mode }) => {
+    if (!path || !sha || (type !== "blob" && type !== "tree" && type !== "commit")) return [];
+    return [{ path, type, sha, size, mode }];
+  });
+
+const toTreeEntries = (items: GitTreeItem[] | undefined): RepoTreeEntry[] =>
+  toGitTreeEntries(items).flatMap(({ path, type, sha, size }) =>
+    type === "commit" ? [] : [{ path, type, sha, size }]
+  );
 
 // Most subfolders a truncated tree is walked folder by folder for. Each folder
 // costs one API call, so a hard cap keeps a pathological repository from
@@ -143,8 +147,14 @@ const TREE_WALK_CONCURRENCY = 8;
 // folder at a time. Used where a partial list would be wrong, not just
 // incomplete (deleting), because files in the missing part would silently
 // survive the deletion.
-const walkTree = async (octokit: Octokit, owner: string, repo: string, rootSha: string): Promise<RepoTreeEntry[]> => {
-  const all: RepoTreeEntry[] = [];
+const walkTree = async (
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  rootSha: string,
+  directories?: ReadonlySet<string>
+): Promise<GitTreeEntry[]> => {
+  const all: GitTreeEntry[] = [];
   let level: { sha: string; prefix: string }[] = [{ sha: rootSha, prefix: "" }];
   let requests = 0;
 
@@ -158,7 +168,7 @@ const walkTree = async (octokit: Octokit, owner: string, repo: string, rootSha: 
       if (data.truncated) {
         throw new Error("A folder in this repository is too large to list completely.");
       }
-      return { prefix, items: toTreeEntries(data.tree) };
+      return { prefix, items: toGitTreeEntries(data.tree) };
     });
 
     const next: { sha: string; prefix: string }[] = [];
@@ -166,7 +176,9 @@ const walkTree = async (octokit: Octokit, owner: string, repo: string, rootSha: 
       for (const item of items) {
         const path = prefix + item.path;
         all.push({ ...item, path });
-        if (item.type === "tree") next.push({ sha: item.sha, prefix: path + "/" });
+        if (item.type === "tree" && (!directories || directories.has(path))) {
+          next.push({ sha: item.sha, prefix: path + "/" });
+        }
       }
     }
     level = next;
@@ -243,7 +255,7 @@ const readHeadTree = async (
   octokit: Octokit,
   owner: string,
   repo: string
-): Promise<{ tree: RepoTreeEntry[]; defaultBranch: string; headSha: string | null }> => {
+): Promise<{ tree: GitTreeEntry[]; defaultBranch: string; headSha: string | null }> => {
   const { data: repoData } = await octokit.rest.repos.get({ owner, repo });
   const defaultBranch = repoData.default_branch || "main";
 
@@ -259,7 +271,7 @@ const readHeadTree = async (
 
   const tree = treeData.truncated
     ? await walkTree(octokit, owner, repo, headSha)
-    : toTreeEntries(treeData.tree);
+    : toGitTreeEntries(treeData.tree);
 
   // Exposing the ref SHA we already fetched lets callers (e.g. deleteRepoPaths)
   // avoid a redundant getRef round trip — and the TOCTOU window that comes
@@ -292,24 +304,19 @@ export const deleteRepoPaths = async (
   const { data: commitData } = await octokit.rest.git.getCommit({ owner, repo, commit_sha: commitSha });
   const baseTreeSha = commitData.tree.sha;
 
-  const isRemoved = (path: string) => isPathRemoved(path, selectedPaths);
-
-  const totalBlobs = tree.filter((e) => e.type === "blob").length;
-  const remainingBlobs = tree.filter((entry) => entry.type === "blob" && !isRemoved(entry.path));
-
-  if (remainingBlobs.length === totalBlobs) {
+  const selected = tree.filter((entry) => entry.type !== "tree" && isPathRemoved(entry.path, selectedPaths));
+  if (selected.some((entry) => entry.type === "commit")) {
+    throw new Error("The selection includes a Git submodule. Remove it with Git so its .gitmodules entry is also updated.");
+  }
+  if (selected.length === 0) {
     throw new Error("None of the selected paths were found in the repository.");
   }
 
   onProgress?.("Building updated file tree...");
-  const deletionTreeItems = tree
-    .filter((entry) => entry.type === "blob" && isRemoved(entry.path))
-    .map((entry) => ({
-      path: entry.path,
-      mode: "100644" as const,
-      type: "blob" as const,
-      sha: null,
-    }));
+  const deletionTreeItems = selected.map((entry) => {
+    const mode = entry.mode === "100755" || entry.mode === "120000" ? entry.mode : "100644";
+    return { path: entry.path, mode, type: "blob", sha: null } as const;
+  });
 
   const { data: newTree } = await octokit.rest.git.createTree({
     owner,
@@ -356,7 +363,9 @@ export interface BlobEntry {
 }
 
 /** One line of the final tree: a file already stored as a blob, or a small text file sent inline. */
-export type TreeEntry = BlobEntry | { path: string; content: string };
+export type TreeEntry = (BlobEntry | { path: string; content: string }) & {
+  executable?: boolean;
+};
 
 // Finds the default branch and its current head, first making the one initial
 // commit that an empty repository needs.
@@ -470,6 +479,34 @@ export const createBlobs = async (
   }
 };
 
+// Use the tree we are about to modify so the mode and commit parent agree.
+const readUploadModes = async (
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  baseTreeSha: string,
+  entries: readonly TreeEntry[]
+): Promise<Map<string, boolean>> => {
+  const paths = new Set(entries.map((entry) => entry.path));
+  const { data } = await octokit.rest.git.getTree({ owner, repo, tree_sha: baseTreeSha, recursive: "true" });
+  let tree: GitTreeEntry[];
+  if (data.truncated) {
+    // A large repository may have many unrelated folders. Only read directory
+    // trees that can contain one of the paths being uploaded.
+    const directories = new Set<string>();
+    for (const path of paths) {
+      for (let separator = path.lastIndexOf("/"); separator > 0; separator = path.lastIndexOf("/", separator - 1)) {
+        directories.add(path.slice(0, separator));
+      }
+    }
+    tree = await walkTree(octokit, owner, repo, baseTreeSha, directories);
+  } else {
+    tree = toGitTreeEntries(data.tree);
+  }
+  return new Map(tree.filter((item) => item.type === "blob" && paths.has(item.path))
+    .map((item) => [item.path, item.mode === "100755"]));
+};
+
 /**
  * Step 2: one tree, one commit and the branch update for everything the blob
  * batches stored, plus any small text files sent inline (GitHub creates those
@@ -488,16 +525,18 @@ export const commitUpload = async (
 
   try {
     const { branchRef, commitSha, baseTreeSha } = await resolveHead(octokit, owner, repo);
+    const existingModes = await readUploadModes(octokit, owner, repo, baseTreeSha, entries);
 
     const { data: newTree } = await octokit.rest.git.createTree({
       owner,
       repo,
       base_tree: baseTreeSha,
-      tree: entries.map((e) =>
-        "sha" in e
-          ? { path: e.path, mode: "100644" as const, type: "blob" as const, sha: e.sha }
-          : { path: e.path, mode: "100644" as const, type: "blob" as const, content: e.content }
-      ),
+      tree: entries.map((entry) => {
+        const executable = existingModes.get(entry.path) ?? entry.executable;
+        const mode = executable ? "100755" as const : "100644" as const;
+        const content = "sha" in entry ? { sha: entry.sha } : { content: entry.content };
+        return { path: entry.path, mode, type: "blob" as const, ...content };
+      }),
     });
 
     const { data: newCommit } = await octokit.rest.git.createCommit({

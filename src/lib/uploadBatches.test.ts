@@ -180,6 +180,21 @@ describe("uploadToGitHub (batched)", () => {
     expect(calls[1].body.entries).toHaveLength(3);
   });
 
+  it("carries archived execute bits through both inline and blob uploads", async () => {
+    const calls = installFakeServer();
+    const files = [
+      { ...textFile("run.sh", "echo ready"), executable: true },
+      { ...binFile("runner"), executable: true },
+    ];
+
+    await uploadToGitHub("o", "r", files, "msg", vi.fn());
+
+    expect(calls.at(-1)?.body.entries).toEqual([
+      { path: "run.sh", content: "echo ready", executable: true },
+      { path: "runner", sha: sha("runner".length), executable: true },
+    ]);
+  });
+
   it("needs only the commit request when every file is small text", async () => {
     const calls = installFakeServer();
     const onProgress = vi.fn();

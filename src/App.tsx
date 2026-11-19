@@ -1,10 +1,10 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, Fragment, Suspense, type ComponentType } from "react";
+import { Component, useState, useEffect, useLayoutEffect, useRef, useCallback, Fragment, Suspense, type ComponentType } from "react";
 import { BrowserRouter, Routes, Route, Link, useLocation, useNavigationType } from "react-router-dom";
 import { trackPageView } from "./lib/analytics";
 import { findPublicPage, NOT_FOUND_PAGE, SITE_ORIGIN } from "./routes";
 import { MAX_TOTAL_UPLOAD_BYTES, SECRET_SCAN_NOTE } from "./lib/uploadLimits";
 import { Github, Sun, Moon, Menu, X } from "lucide-react";
-import { CARD_EDGE, StepBadge, T } from "./components/ui";
+import { CARD_EDGE, CTRL, StepBadge, T } from "./components/ui";
 
 // --- Theme --- //
 // Light or dark at every width. The first visit follows the OS setting
@@ -254,6 +254,27 @@ function RouteEffects() {
   return null;
 }
 
+class UploaderErrorBoundary extends Component<{ children: React.ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <section className={`w-full max-w-content ${CARD_EDGE} p-6 sm:p-12`}>
+        <h1 className={`${T.h1} mb-3`}>Couldn’t load the uploader</h1>
+        <p role="alert" className="mb-4 text-muted">Reload the page to try again.</p>
+        <button type="button" className={`${CTRL} bg-primary px-5 text-on-primary hover:bg-primary-hover`} onClick={() => window.location.reload()}>
+          Reload page
+        </button>
+      </section>
+    );
+  }
+}
+
 // --- Home screen shell: full-width desktop layout with the app card
 // centered in the middle of the page. --- //
 function HomeLayout({ Uploader }: { Uploader: ComponentType }) {
@@ -275,7 +296,9 @@ function HomeLayout({ Uploader }: { Uploader: ComponentType }) {
           gutters), so the card starts at the same height on every page instead
           of floating in the middle of the viewport. */}
       <main className="flex-1 flex flex-col items-center px-4 pt-4 pb-8 sm:px-6 relative">
-        <Uploader />
+        <UploaderErrorBoundary>
+          <Uploader />
+        </UploaderErrorBoundary>
       </main>
 
       <Footer widthClass={W_HOME} />

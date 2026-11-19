@@ -449,6 +449,9 @@ export async function createApp() {
       if (entries.some((e: any) => isUnsafePath(e?.path))) {
         return res.status(400).json({ message: "One or more file paths are invalid." });
       }
+      if (entries.some((entry) => entry.executable !== undefined && typeof entry.executable !== "boolean")) {
+        return res.status(400).json({ message: "The executable flag must be true or false." });
+      }
       if (!entries.every(isValidTreeEntry)) {
         return res.status(400).json({
           message: "Every entry needs either a valid blob SHA or non-empty text content.",
