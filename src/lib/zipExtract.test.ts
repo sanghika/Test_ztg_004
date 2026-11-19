@@ -18,7 +18,7 @@ const makeZip = async (files: Record<string, string>): Promise<Uint8Array> => {
 const extract = async (data: Uint8Array) => {
   const out: { path: string; text: string }[] = [];
   await extractZipEntries(JSZip, data, {
-    onFile: (path, base64) => out.push({ path, text: Buffer.from(base64, "base64").toString("utf-8") }),
+    onFile: ({ path, content }) => out.push({ path, text: Buffer.from(content, "base64").toString("utf-8") }),
     yieldBetweenBatches: false,
   });
   return out;
@@ -66,7 +66,7 @@ describe("extractZipEntries", () => {
     const files: string[] = [];
     await extractZipEntries(JSZip, data, {
       yieldBetweenBatches: false,
-      onFile: (_path, base64) => files.push(base64),
+      onFile: ({ content }) => files.push(content),
     });
     expect(files).toEqual([Buffer.from(bytes).toString("base64")]);
   });
@@ -91,7 +91,7 @@ describe("extractZipEntries", () => {
     try {
       await expect(extractZipEntries(JSZip, data, { onFile, yieldBetweenBatches: false }))
         .rejects.toThrow(/total upload limit/);
-      expect(onFile.mock.calls.map(([file]) => file)).toEqual(["first.txt"]);
+      expect(onFile.mock.calls.map(([file]) => file.path)).toEqual(["first.txt"]);
       expect(pause).toHaveBeenCalledOnce();
       const observedBytes = processed.mock.calls.reduce((size, [chunk]) => size + chunk.length, 0);
       expect(observedBytes).toBeLessThan(MAX_TOTAL_UPLOAD_BYTES);

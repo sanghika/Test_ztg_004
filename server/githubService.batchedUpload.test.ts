@@ -4,6 +4,7 @@ const {
   mockReposGet,
   mockCreateOrUpdateFileContents,
   mockGetRef,
+  mockGetTree,
   mockGetCommit,
   mockCreateBlob,
   mockCreateTree,
@@ -13,6 +14,7 @@ const {
   mockReposGet: vi.fn(),
   mockCreateOrUpdateFileContents: vi.fn(),
   mockGetRef: vi.fn(),
+  mockGetTree: vi.fn(),
   mockGetCommit: vi.fn(),
   mockCreateBlob: vi.fn(),
   mockCreateTree: vi.fn(),
@@ -29,6 +31,7 @@ vi.mock("./octokit", () => ({
       },
       git: {
         getRef: mockGetRef,
+        getTree: mockGetTree,
         getCommit: mockGetCommit,
         createBlob: mockCreateBlob,
         createTree: mockCreateTree,
@@ -43,6 +46,8 @@ const { createBlobs, commitUpload } = await import("./githubService");
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockGetTree.mockReset();
+  mockGetTree.mockResolvedValue({ data: { tree: [], truncated: false } });
 });
 
 const b64 = (text: string) => Buffer.from(text).toString("base64");
@@ -207,6 +212,37 @@ describe("commitUpload", () => {
       expect.objectContaining({ owner: "me", repo: "normal-repo", ref: "heads/main", sha: "final-commit-sha" })
     );
     expect(commit.sha).toBe("final-commit-sha");
+  });
+
+  it("keeps existing file modes and recovers missing modes from a truncated tree", async () => {
+    mockReposGet.mockResolvedValue({ data: { default_branch: "main" } });
+    mockGetRef.mockResolvedValue({ data: { object: { sha: "existing-commit-sha" } } });
+    mockGetCommit.mockResolvedValue({ data: { tree: { sha: "existing-tree-sha" } } });
+    mockCreateTree.mockResolvedValue({ data: { sha: "new-tree-sha" } });
+    mockCreateCommit.mockResolvedValue({ data: { sha: "final-commit-sha" } });
+    mockUpdateRef.mockResolvedValue({ data: {} });
+    mockGetTree
+      .mockResolvedValueOnce({ data: { tree: [], truncated: true } })
+      .mockResolvedValueOnce({ data: { tree: [
+        { path: "scripts", type: "tree", sha: "scripts-tree", mode: "040000" },
+        { path: "unrelated", type: "tree", sha: "unrelated-tree", mode: "040000" },
+        { path: "README.md", type: "blob", sha: "old-readme", mode: "100644" },
+      ] } })
+      .mockResolvedValueOnce({ data: { tree: [
+        { path: "setup.sh", type: "blob", sha: "old-script", mode: "100755" },
+      ] } });
+
+    await commitUpload("fake-token", "me", "repo", [
+      { path: "scripts/setup.sh", content: "echo setup" },
+      { path: "README.md", content: "# Updated", executable: true },
+      { path: "scripts/new.sh", sha: "new-blob", executable: true },
+    ], "Upload files");
+
+    expect(mockGetTree.mock.calls.map(([query]) => query.tree_sha)).toEqual([
+      "existing-tree-sha", "existing-tree-sha", "scripts-tree",
+    ]);
+    expect(mockCreateTree.mock.calls[0][0].tree.map(({ path, mode }: { path: string; mode: string }) => [path, mode]))
+      .toEqual([["scripts/setup.sh", "100755"], ["README.md", "100644"], ["scripts/new.sh", "100755"]]);
   });
 
   it("puts small text files into the tree as inline content, with no blob call for them", async () => {

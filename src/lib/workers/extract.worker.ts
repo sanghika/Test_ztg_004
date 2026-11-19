@@ -26,10 +26,10 @@ scope.onmessage = async (event: MessageEvent<{ file: Blob }>) => {
 
   try {
     await extractZipEntries(JSZip, event.data.file, {
-      onFile: (path, content) => {
-        const size = path.length + content.length;
+      onFile: (file) => {
+        const size = file.path.length + file.content.length;
         if (chars + size > maxChars) flush();
-        files.push({ path, content });
+        files.push(file);
         chars += size;
         if (files.length === 32 || chars >= maxChars) flush();
       },

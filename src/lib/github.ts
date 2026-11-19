@@ -7,6 +7,7 @@ import { encodeUploadBody, type PreparedUploadBody } from "./uploadBody";
 export interface ExtractedFile {
   path: string;
   content: string; // base64 encoded
+  executable?: boolean;
 }
 
 export interface RepoTreeEntry {
@@ -61,9 +62,9 @@ const extractZipOnMainThread = async (
   const result: ExtractedFile[] = [];
   const JSZipClass = await loadJSZip();
   await extractZipEntries(JSZipClass, file, {
-    onFile: (path, content) => {
-      result.push({ path, content });
-      onProgress?.(path);
+    onFile: (entry) => {
+      result.push(entry);
+      onProgress?.(entry.path);
     },
     yieldBetweenBatches: true,
   });
@@ -451,11 +452,13 @@ const inlineTextOf = (base64: string): string | null => {
   }
 };
 
+type InlineUploadEntry = Pick<ExtractedFile, "path" | "executable"> & { content: string };
+
 /** Splits files into small text files to send with the commit and everything else, which goes up as blobs. */
 export const splitInlineText = (
   files: ExtractedFile[]
-): { inline: { path: string; content: string }[]; blobFiles: ExtractedFile[] } => {
-  const inline: { path: string; content: string }[] = [];
+): { inline: InlineUploadEntry[]; blobFiles: ExtractedFile[] } => {
+  const inline: InlineUploadEntry[] = [];
   const blobFiles: ExtractedFile[] = [];
   let inlineBytes = 0;
   for (const file of files) {
@@ -463,7 +466,7 @@ export const splitInlineText = (
     const fits = bytes <= MAX_INLINE_FILE_BYTES && inlineBytes + bytes <= MAX_INLINE_TOTAL_BYTES;
     const text = fits ? inlineTextOf(file.content) : null;
     if (text !== null) {
-      inline.push({ path: file.path, content: text });
+      inline.push({ ...file, content: text });
       inlineBytes += bytes;
     } else {
       blobFiles.push(file);
@@ -472,7 +475,7 @@ export const splitInlineText = (
   return { inline, blobFiles };
 };
 
-type UploadEntry = { path: string; sha: string } | { path: string; content: string };
+type UploadEntry = InlineUploadEntry | (Pick<ExtractedFile, "path" | "executable"> & { sha: string });
 type UploadBody = { owner: string; repo: string } &
   ({ files: ExtractedFile[] } | { entries: UploadEntry[]; commitMessage: string });
 
@@ -532,6 +535,7 @@ export const uploadToGitHub = async (
   // Steps: one per file that goes up as a blob, then the commit and its finish.
   const total = blobFiles.length + 2;
   const entries: UploadEntry[] = [...inline];
+  const executablePaths = new Set(blobFiles.filter((file) => file.executable).map((file) => file.path));
 
   const uploadingMessage = (done: number) => `Uploading files (${done}/${blobFiles.length})...`;
   let uploaded = 0;
@@ -545,7 +549,7 @@ export const uploadToGitHub = async (
     if (!Array.isArray(result.blobs) || result.blobs.length !== batch.length) {
       throw new Error("The server did not confirm every file in this upload. Please try again.");
     }
-    entries.push(...result.blobs);
+    entries.push(...result.blobs.map((blob) => executablePaths.has(blob.path) ? { ...blob, executable: true } : blob));
     uploaded += batch.length;
     onProgress(uploadingMessage(uploaded), uploaded, total);
   }

@@ -90,6 +90,23 @@ class PublicRoutes(unittest.TestCase):
         self.assertEqual(1, page.locator('link[rel="modulepreload"][href*="/ZipUploader-"]').count())
         expect(heading).to_be_visible()
 
+    def test_failed_uploader_download_can_be_recovered_by_reloading(self):
+        page = self.browser.new_page()
+        self.addCleanup(page.close)
+        chunk = "**/assets/ZipUploader-*.js"
+        page.route(chunk, lambda route: route.abort())
+        page.goto(f"{ORIGIN}/faq")
+        page.get_by_role("link", name="ZiptoGit").click()
+        expect(page.get_by_role("heading", name="Couldn’t load the uploader")).to_be_visible()
+        expect(page.get_by_role("navigation", name="Footer")).to_be_visible()
+
+        page.unroute(chunk)
+        with page.expect_navigation():
+            page.get_by_role("button", name="Reload page").click()
+        expect(page.get_by_role("heading", name="Upload a ZIP file to GitHub")).to_be_visible()
+        page.get_by_role("button", name="Switch to dark mode").click()
+        expect(page.locator("html")).to_have_class("dark")
+
     def test_mobile_escape_returns_focus_to_menu_button(self):
         page = self.browser.new_page(viewport={"width": 390, "height": 844})
         self.addCleanup(page.close)
