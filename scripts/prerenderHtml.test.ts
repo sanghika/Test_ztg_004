@@ -63,7 +63,7 @@ describe("renderPage", () => {
 
   it("declares the preferred site name on the homepage", () => {
     const html = renderPage(template, { path: "/" }, "<h1>Hero</h1>", ORIGIN);
-    expect(html).toContain('<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"ZiptoGit","url":"https://ziptogit.in/"}</script>');
+    expect(html).toContain('<script id="website-schema" type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"ZiptoGit","url":"https://ziptogit.in/"}</script>');
   });
 
   it("escapes quotes and angle brackets in attribute and title text", () => {

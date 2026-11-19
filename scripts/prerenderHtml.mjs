@@ -1,5 +1,6 @@
 // Pure string work for the prerender step, kept apart from scripts/prerender.mjs
 // (file system + SSR bundle) so it can be unit tested on its own.
+import { WEBSITE_SCHEMA_ID, websiteStructuredData } from "../src/siteStructuredData.mjs";
 
 const escapeAttr = (value) =>
   String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -34,13 +35,8 @@ export function renderPage(template, route, appHtml, origin) {
 
   const url = origin + route.path;
   if (route.path === "/") {
-    const site = JSON.stringify({
-      "@context": "https://schema.org",
-      "@type": "WebSite",
-      name: "ZiptoGit",
-      url,
-    }).replace(/</g, "\\u003c");
-    html = replaceOnce(html, /<\/head>/, () => `<script type="application/ld+json">${site}</script>\n  </head>`, "</head>");
+    const site = websiteStructuredData(origin);
+    html = replaceOnce(html, /<\/head>/, () => `<script id="${WEBSITE_SCHEMA_ID}" type="application/ld+json">${site}</script>\n  </head>`, "</head>");
   }
 
   const setAttribute = (pattern, value, label) => {

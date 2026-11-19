@@ -266,47 +266,50 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<Respon
   return res;
 }
 
-// Reads a newline-delimited JSON progress stream from our upload/delete
-// endpoints. Each line is either a progress event or the final {"done": true}.
-async function readNdjsonStream<T>(
-  res: Response,
-  onProgress?: (status: string, current?: number, total?: number) => void
-): Promise<T> {
-  const reader = res.body?.getReader();
-  if (!reader) {
-    // Fallback for environments without a streaming body reader.
-    const text = await res.text();
-    const lines = text.split("\n").filter(Boolean);
-    const last = JSON.parse(lines[lines.length - 1]);
-    if (last.error) throw new Error(last.error);
-    return last as T;
-  }
+type DeleteEvent = { done?: unknown; status?: unknown; error?: unknown; commit?: { sha?: unknown } };
 
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let result: any = null;
+// Both streaming and buffered responses must end with a confirmed commit or
+// an explicit error. A progress line alone tells us nothing about the result.
+async function readDeleteResult(res: Response, onProgress?: (status: string) => void): Promise<{ sha: string }> {
+  let last: DeleteEvent | undefined;
+  const consume = (text: string) => {
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      const event: DeleteEvent = JSON.parse(line);
+      last = event;
+      if (event?.done !== true && typeof event?.status === "string") onProgress?.(event.status);
+    }
+  };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx: number;
-    while ((idx = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, idx).trim();
-      buffer = buffer.slice(idx + 1);
-      if (!line) continue;
-      const evt = JSON.parse(line);
-      if (evt.done) {
-        result = evt;
-      } else if (onProgress) {
-        onProgress(evt.status, evt.current, evt.total);
+  if (typeof res.body?.getReader !== "function") {
+    consume(await res.text());
+  } else {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const boundary = buffer.lastIndexOf("\n");
+        if (boundary < 0) continue;
+        consume(buffer.slice(0, boundary + 1));
+        buffer = buffer.slice(boundary + 1);
       }
+      consume(buffer + decoder.decode());
+    } finally {
+      reader.releaseLock();
     }
   }
 
-  if (!result) throw new Error("Connection closed before the operation finished.");
-  if (result.error) throw new Error(result.error);
-  return result as T;
+  if (last?.done === true) {
+    if (typeof last.error === "string" && last.error) throw new Error(last.error);
+    if (typeof last.commit?.sha === "string" && last.commit.sha) {
+      return { ...last.commit, sha: last.commit.sha };
+    }
+  }
+  throw new Error("Connection closed before the operation finished.");
 }
 
 // What GET /api/bootstrap returns: the user plus the FIRST page of repositories.
@@ -598,6 +601,5 @@ export const deleteRepoPaths = async (
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ owner, repo, paths: selectedPaths, commitMessage }),
   });
-  const result = await readNdjsonStream<{ commit: any }>(res, (status) => onProgress?.(status));
-  return result.commit;
+  return readDeleteResult(res, onProgress);
 };

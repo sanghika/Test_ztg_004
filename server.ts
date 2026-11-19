@@ -10,6 +10,7 @@ import * as githubService from "./server/githubService";
 import { createSessionData } from "./server/sessionData";
 import { scanPrecompressed, sendPrecompressed, servePrecompressed } from "./server/precompressed";
 import { hasFileExtension } from "./server/spaFallback";
+import { inlineScriptSource, pageContentSecurityPolicy } from "./server/securityHeaders";
 import { readAuthConfig, readPort } from "./server/config";
 import { findPublicPage, NOT_FOUND_PAGE, PRERENDER_ROUTES } from "./src/routes";
 
@@ -79,10 +80,20 @@ export async function createApp() {
 
   app.use(cookieParser(cookieSecret));
 
+  const distPath = path.join(process.cwd(), "dist");
+  const builtHome = path.join(distPath, "index.html");
+  const contentPolicy = isProd
+    ? pageContentSecurityPolicy(fs.existsSync(builtHome) ? fs.readFileSync(builtHome, "utf8") : "")
+    : null;
+
   // Basic security headers
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    if (contentPolicy) {
+      res.setHeader("Content-Security-Policy", contentPolicy);
+      res.setHeader("X-Frame-Options", "DENY");
+    }
     next();
   });
 
@@ -360,21 +371,31 @@ export async function createApp() {
         // The token is set as an HttpOnly cookie the browser can never read via JS,
         // and is never included in the postMessage payload sent to the opener window.
         setSessionCookie(res, token, upgradeToken !== null);
-        res.send(`
-          <html>
+        const callbackScript = `
+        if (window.opener) {
+          try {
+            window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', state: ${JSON.stringify(state)} }, ${JSON.stringify(appOrigin)});
+            window.close();
+          } catch (e) {
+            window.location.href = '/';
+          }
+        } else {
+          window.location.href = '/';
+        }
+        `;
+        res.setHeader("X-Frame-Options", "DENY");
+        res.setHeader("Content-Security-Policy", [
+          "default-src 'none'",
+          "script-src " + inlineScriptSource(callbackScript),
+          "base-uri 'none'",
+          "form-action 'none'",
+          "frame-ancestors 'none'",
+        ].join("; "));
+        res.send(`<!doctype html>
+          <html lang="en">
+            <head><title>GitHub authorization</title></head>
             <body>
-              <script>
-                if (window.opener) {
-                  try {
-                    window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', state: ${JSON.stringify(state)} }, ${JSON.stringify(appOrigin)});
-                    window.close();
-                  } catch (e) {
-                    window.location.href = '/';
-                  }
-                } else {
-                  window.location.href = '/';
-                }
-              </script>
+              <script>${callbackScript}</script>
               <p>Authentication successful. You can close this window.</p>
             </body>
           </html>
@@ -629,7 +650,6 @@ export async function createApp() {
     });
     app.use(vite.middlewares);
   } else if (isProd) {
-    const distPath = path.join(process.cwd(), "dist");
     // Vite fingerprints everything under /assets with a content hash, so those
     // files are safe to cache forever — a new build always gets new filenames.
     // index.html is NOT fingerprinted, so it must always be revalidated;
