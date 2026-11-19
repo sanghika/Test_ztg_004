@@ -388,7 +388,7 @@
   }
 }
 
-/* Signature desktop-showcase terminal (ZipToGitTerminal in App.tsx) — a
+/* Signature desktop-showcase terminal (ZipToGitTerminal in ZipUploader.tsx) — a
    one-pass sequence: file chips fade/slide in as they "extract", the
    commit graph node pops in once committed, log lines step in, the cursor
    blinks, and the active stage dot pulses. Applied via inline `style=

@@ -1,8 +1,10 @@
 // Server-side entry, used only at build time by scripts/prerender.mjs
 // (`vite build --ssr`). Never shipped to the browser.
+import { Suspense } from "react";
 import { renderToString } from "react-dom/server";
 import { StaticRouter } from "react-router-dom";
 import { AppRoutes } from "./App.tsx";
+import ZipUploader from "./ZipUploader.tsx";
 
 export { HOME_HEADING, PRERENDER_ROUTES, SITE_ORIGIN } from "./routes.ts";
 
@@ -10,7 +12,9 @@ export { HOME_HEADING, PRERENDER_ROUTES, SITE_ORIGIN } from "./routes.ts";
 export function render(url: string): string {
   return renderToString(
     <StaticRouter location={url}>
-      <AppRoutes />
+      <Suspense fallback={null}>
+        <AppRoutes Uploader={ZipUploader} />
+      </Suspense>
     </StaticRouter>,
   );
 }

@@ -31,6 +31,14 @@ const shellPath = path.join(distDir, "200.html");
 const template = await readFile(existsSync(shellPath) ? shellPath : path.join(distDir, "index.html"), "utf8");
 await writeFile(shellPath, template);
 
+const manifest = JSON.parse(await readFile(path.join(distDir, ".vite", "manifest.json"), "utf8"));
+const uploaderChunk = Object.values(manifest).find((chunk) => chunk.isDynamicEntry && chunk.name === "ZipUploader")?.file;
+if (!uploaderChunk) throw new Error("prerender: homepage uploader chunk missing from the client manifest");
+const homeTemplate = template.replace(
+  "</head>",
+  `<link rel="modulepreload" crossorigin href="/${uploaderChunk}" />\n  </head>`
+);
+
 for (const route of PRERENDER_ROUTES) {
   const appHtml = render(route.path);
   if (!appHtml.includes("<h1")) throw new Error(`prerender: ${route.path} rendered without an <h1>`);
@@ -40,6 +48,7 @@ for (const route of PRERENDER_ROUTES) {
   }
   const out = path.join(distDir, outputPathFor(route.path));
   await mkdir(path.dirname(out), { recursive: true });
-  await writeFile(out, renderPage(template, route, appHtml, SITE_ORIGIN));
+  const pageTemplate = route.path === "/" ? homeTemplate : template;
+  await writeFile(out, renderPage(pageTemplate, route, appHtml, SITE_ORIGIN));
   console.log(`prerendered ${route.path.padEnd(16)} -> ${path.relative(process.cwd(), out)}`);
 }

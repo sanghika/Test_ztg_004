@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
 
-export default defineConfig(() => {
+export default defineConfig(({isSsrBuild}) => {
   return {
     plugins: [react(), tailwindcss()],
     resolve: {
@@ -11,6 +11,7 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    build: { manifest: !isSsrBuild },
     server: {
       allowedHosts: ['.code.run', 'ziptogit.in', 'www.ziptogit.in'],
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
