@@ -83,7 +83,7 @@ describe("analytics is off unless there is a real measurement ID", () => {
 const faqContext = {
   page_path: "/faq",
   page_location: "https://ziptogit.in/faq",
-  page_title: "FAQ | ZiptoGit",
+  page_title: "GitHub ZIP uploads: limits, permissions and pricing | ZiptoGit",
   page_referrer: "",
 };
 

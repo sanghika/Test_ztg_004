@@ -4,8 +4,8 @@ import type { BootstrapData } from "./lib/github";
 import { trackEvent, trackPageView } from "./lib/analytics";
 import { prefetchAuthUrl, takeAuthUrl } from "./lib/authUrl";
 import { readSessionFlag, clearSessionFlag, sessionPending, endSessionPending } from "./lib/session";
-import { findPublicPage, NOT_FOUND_PAGE, SITE_ORIGIN } from "./routes";
-import { SECRET_SCAN_NOTE } from "./lib/uploadLimits";
+import { findPublicPage, HOME_HEADING, NOT_FOUND_PAGE, SITE_ORIGIN } from "./routes";
+import { MAX_TOTAL_UPLOAD_BYTES, SECRET_SCAN_NOTE } from "./lib/uploadLimits";
 import { Github, Loader2, CheckCircle, ShieldCheck, Sun, Moon, Menu, X } from "lucide-react";
 import { Alert, CARD_EDGE, CTRL, StepBadge, T, useMediaQuery } from "./components/ui";
 
@@ -594,15 +594,15 @@ function ZipUploader() {
   // at any viewport. Left-aligned; the button is full width below lg.
   const signedOutPanel = (
     <>
-      <h1 className={`${T.h1} text-ink dark:text-white mb-2`}>Connect your GitHub account</h1>
+      <h1 className={`${T.h1} text-ink dark:text-white mb-2`}>{HOME_HEADING}</h1>
       <p className={`${T.prose} text-muted max-w-copy mb-8`}>
-        Securely push ZIP contents directly to your repositories without needing a local Git environment.
+        Push the files inside a ZIP to a GitHub repository without installing Git. On desktop, you can also upload a project folder.
       </p>
       <div className="w-full flex flex-col [&>button]:w-full lg:w-auto lg:block lg:[&>button]:w-auto">{connectButton}</div>
       {errorMsg && <div className="w-full"><Alert variant="error" className="mt-3">{errorMsg}</Alert></div>}
       <p className="mt-6 flex items-start gap-2 text-sm text-muted max-w-copy">
         <ShieldCheck className="w-4 h-4 mt-0.5 shrink-0 text-emerald-700 dark:text-emerald-400" />
-        <span>{SECRET_SCAN_NOTE}</span>
+        <span>{SECRET_SCAN_NOTE} <Link to="/faq" className="underline">See which GitHub permissions we request.</Link></span>
       </p>
     </>
   );
@@ -644,7 +644,7 @@ function ZipUploader() {
 // Bump this whenever the Privacy policy copy below actually changes — it must
 // never be computed at render time (was `new Date().toLocaleDateString()`,
 // which falsely told every visitor the policy was updated that same day).
-const PRIVACY_LAST_UPDATED = "November 18, 2026";
+const PRIVACY_LAST_UPDATED = "November 19, 2026";
 // Change this date whenever the Terms copy changes.
 const TERMS_LAST_UPDATED = "August 10, 2026";
 
@@ -655,7 +655,7 @@ function PrivacyPage() {
         <h1 className={`${T.h1} text-ink dark:text-white mb-6`}>Privacy policy</h1>
         <p className="mb-4 text-sm text-muted">Last updated: {PRIVACY_LAST_UPDATED}</p>
         <h2 className={`${T.h2} mt-6 mb-3`}>1. Information we collect</h2>
-        <p className="mb-4">ZiptoGit requests OAuth access to your GitHub account to push files directly to your repositories. We do not store your repository contents or your source code on our servers.</p>
+        <p className="mb-4">ZiptoGit requests GitHub OAuth repository access to read and push files to repositories you can access, including private repositories. It also requests the <code>delete_repo</code> permission for the Delete repository feature. This feature asks you to confirm before deleting a repository. We do not store your repository contents or your source code on our servers.</p>
         <h2 className={`${T.h2} mt-6 mb-3`}>2. How we use information</h2>
         <p className="mb-4">Your browser stores your GitHub access token in a signed HttpOnly session cookie. HttpOnly prevents page scripts from reading it. The server uses the cookie to make GitHub API requests on your behalf. The cookie expires after 30 days or is cleared when you disconnect.</p>
         <h2 className={`${T.h2} mt-6 mb-3`}>3. Third-party services</h2>
@@ -699,18 +699,20 @@ function ContactPage() {
   );
 }
 
+const uploadLimitMiB = MAX_TOTAL_UPLOAD_BYTES / (1024 * 1024);
+
 const HOW_IT_WORKS_STEPS = [
   {
     title: "Connect GitHub",
     body: "Sign in with your GitHub account. Your browser keeps the access token in an HttpOnly cookie for the server to use when making GitHub API requests.",
   },
   {
-    title: "Upload ZIP",
-    body: `Add your AI Studio ZIP export by dropping it in or choosing it from your files. ZiptoGit extracts it in your browser. ${SECRET_SCAN_NOTE}`,
+    title: "Add a ZIP or folder",
+    body: `Choose a ZIP archive, including an AI Studio export, or select a project folder on desktop. ZiptoGit extracts ZIPs in your browser. The total file size limit is ${uploadLimitMiB} MiB after extraction. ${SECRET_SCAN_NOTE}`,
   },
   {
-    title: "Sync directly",
-    body: "We push the extracted files directly back into your selected repository using the GitHub API in one clean commit.",
+    title: "Commit files to GitHub",
+    body: "Choose a repository and review your files before pushing. ZiptoGit creates one commit for the upload. If the repository has never had a commit, ZiptoGit initializes it with a separate commit first.",
   },
 ];
 
@@ -718,7 +720,7 @@ function HowItWorksPage() {
   return (
     <PageLayout>
       <div className={`w-full max-w-content ${CARD_EDGE} p-6 sm:p-12 ${T.prose}`}>
-        <h1 className={`${T.h1} text-ink dark:text-white mb-6`}>How it works</h1>
+        <h1 className={`${T.h1} text-ink dark:text-white mb-6`}>How to upload a ZIP to GitHub</h1>
         <ol className="space-y-6">
           {HOW_IT_WORKS_STEPS.map((step, i) => (
             <li key={step.title} className="flex gap-4">
@@ -739,8 +741,10 @@ function HowItWorksPage() {
 function FAQPage() {
   const faqs = [
     { q: "How are my files and GitHub token handled?", a: `ZiptoGit extracts your ZIP in your browser. ${SECRET_SCAN_NOTE} The server sends your files to GitHub using the access token from your browser’s HttpOnly session cookie.` },
+    { q: "What can I upload?", a: `You can upload a ZIP archive or select a project folder on desktop. The total limit for files is ${uploadLimitMiB} MiB after ZIP extraction.` },
+    { q: "Which GitHub permissions does ZiptoGit request?", a: "ZiptoGit requests the repo permission to read and push files in repositories you can access, including private repositories. It also requests delete_repo for the Delete repository feature, which asks you to confirm before deleting a repository." },
     { q: "What does ZiptoGit cost?", a: "It is currently completely free to use." },
-    { q: "Can I use it for private repositories?", a: "Yes. When you authenticate via OAuth, you grant the app access to read and commit to repositories you have permissions for." }
+    { q: "Can I use it for private repositories?", a: "Yes. You can upload files to a private repository if your GitHub account has permission to commit to it." }
   ];
 
   return (

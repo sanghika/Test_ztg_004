@@ -6,7 +6,7 @@
     <title>ZiptoGit - Push ZIP Archives Directly to GitHub</title>
     
     <!-- SEO Metadata -->
-    <meta name="description" content="Securely upload your AI Studio ZIP exports and push their extracted contents directly to your GitHub repositories without needing a local Git environment or CLI." />
+    <meta name="description" content="Upload a ZIP archive or, on desktop, a project folder. Push the files to GitHub from your browser without installing Git." />
     <meta name="keywords" content="GitHub, ZIP upload, Git push online, AI Studio export, ZiptoGit, Zip Sync" />
     <meta name="author" content="Dipesh Nalawade" />
     <meta name="robots" content="index, follow" />
@@ -38,7 +38,7 @@
     <!-- Returning visitor on "/": the server sets a readable has_session=1 cookie
          next to the HttpOnly session cookie. If it is present, (1) mark <html> so
          index.css hides the prerendered signed-out hero (a signed-in person must
-         not see "Connect your GitHub account" flash up) and shows a spinner in its
+         not see the upload landing page flash up) and shows a spinner in its
          place, (2) preconnect to the avatar host, and (3) start GET /api/bootstrap (user + first page of repos) right
          now, so it runs in parallel with the JS download instead of after it.
          fetchBootstrap() in src/lib/github.ts takes the result from
@@ -77,7 +77,7 @@
 
     <!-- Open Graph Tags -->
     <meta property="og:title" content="ZiptoGit - Fast ZIP to GitHub Pushing" />
-    <meta property="og:description" content="Securely upload your AI Studio ZIP exports and push their extracted contents directly to your GitHub repositories online." />
+    <meta property="og:description" content="Upload a ZIP archive or, on desktop, a project folder. Push the files to GitHub from your browser without installing Git." />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://ziptogit.in/" />
     <meta property="og:image" content="https://ziptogit.in/social.jpg" />
@@ -87,7 +87,7 @@
     <!-- Twitter / X Cards -->
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="ZiptoGit - Fast ZIP to GitHub Pushing" />
-    <meta name="twitter:description" content="Securely upload your AI Studio ZIP exports and push their extracted contents directly to your GitHub repositories online." />
+    <meta name="twitter:description" content="Upload a ZIP archive or, on desktop, a project folder. Push the files to GitHub from your browser without installing Git." />
     <meta name="twitter:image" content="https://ziptogit.in/social.jpg" />
     
     <!-- Analytics is not loaded from this file. src/lib/analytics.ts adds Google
