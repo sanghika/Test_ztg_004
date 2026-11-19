@@ -50,18 +50,21 @@ class DashboardRaces(unittest.TestCase):
 
     def test_replaced_zip_cannot_supply_commit_contents(self):
         page = self.page
-        # Hold the first job before its real worker receives it. Await its final
-        # message so the stale job has actually finished when we click Push.
         page.add_init_script("""
             const post = Worker.prototype.postMessage;
+            const terminate = Worker.prototype.terminate;
+            let firstWorker;
             Worker.prototype.postMessage = function(message, ...rest) {
-                if (message.file?.name !== "first.zip") return post.call(this, message, ...rest);
-                window.finishFirst = () => new Promise(resolve => {
-                    this.addEventListener("message", event => {
-                        if (event.data.type === "done") requestAnimationFrame(() => requestAnimationFrame(resolve));
-                    });
-                    post.call(this, message, ...rest);
-                });
+                if (message.file?.name === "first.zip") {
+                    firstWorker = this;
+                    window.firstZipStarted = true;
+                    return;
+                }
+                return post.call(this, message, ...rest);
+            };
+            Worker.prototype.terminate = function() {
+                if (this === firstWorker) window.firstZipCanceled = true;
+                return terminate.call(this);
             };
         """)
         commits = []
@@ -77,12 +80,12 @@ class DashboardRaces(unittest.TestCase):
         page.goto(ORIGIN)
         picker = page.locator("input[type=file][accept]")
         picker.set_input_files(archive("first"))
-        page.wait_for_function("typeof window.finishFirst === 'function'")
+        page.wait_for_function("window.firstZipStarted")
         page.get_by_role("button", name="Remove selected files").click()
         picker.set_input_files(archive("second"))
         push = page.get_by_role("button", name="Push files", exact=True).last
         expect(push).to_be_enabled()
-        page.evaluate("window.finishFirst()")
+        self.assertTrue(page.evaluate("window.firstZipCanceled"))
         expect(page.get_by_text("second.zip", exact=True)).to_be_visible()
         push.click()
         expect(page.get_by_role("button", name="Push more files")).to_be_visible()
@@ -312,6 +315,39 @@ class DashboardRaces(unittest.TestCase):
         expect(picker).to_be_enabled()
         picker.select_option("demo/second")
         expect(picker).to_have_value("demo/second")
+
+    def test_large_dropped_folder_stops_opening_files_as_soon_as_it_exceeds_the_budget(self):
+        page = self.page
+        page.goto(ORIGIN)
+        drop_zone = page.get_by_role("button", name="Choose ZIP file").locator("..")
+        drop_zone.evaluate("""zone => {
+            window.metadataReads = 0;
+            DataTransferItem.prototype.webkitGetAsEntry = () => ({
+                name: "project", isDirectory: true,
+                createReader: () => {
+                    let read = false;
+                    return {
+                        readEntries(done) {
+                            if (read) return done([]);
+                            read = true;
+                            done(Array.from({length: 30}, (_, index) => ({
+                                name: index + ".txt", isFile: true,
+                                file(resolve) {
+                                    window.metadataReads++;
+                                    resolve({size: 26 * 1024 * 1024});
+                                },
+                            })));
+                        }
+                    };
+                },
+            });
+            const dataTransfer = new DataTransfer();
+            dataTransfer.items.add(new File(["placeholder"], "example.txt"));
+            zone.dispatchEvent(new DragEvent("drop", {bubbles: true, cancelable: true, dataTransfer}));
+        }""")
+        expect(page.get_by_role("alert")).to_contain_text("total upload limit")
+        expect(page.get_by_role("button", name="Choose ZIP file")).to_be_enabled()
+        self.assertEqual(6, page.evaluate("window.metadataReads"))
 
     def test_dropped_folder_read_errors_leave_the_picker_usable(self):
         page = self.page

@@ -15,22 +15,30 @@ type ZipFileEntry = JSZip.JSZipObject & {
   internalStream(type: "uint8array"): JSZip.JSZipStreamHelper<Uint8Array>;
 };
 
-function readZipFile(entry: JSZip.JSZipObject, path: string, bytesSoFar: number) {
+function readZipFile(entry: JSZip.JSZipObject, path: string, bytesSoFar: number, signal?: AbortSignal) {
   return new Promise<{ base64: string; bytes: number }>((resolve, reject) => {
+    signal?.throwIfAborted();
     const stream = (entry as ZipFileEntry).internalStream("uint8array");
     let bytes = 0;
-    let exceededLimit = false;
+    let stopped = false;
     const encoded: string[] = [];
     let tail = "";
+    const cleanup = () => signal?.removeEventListener("abort", abort);
+    const fail = (error: unknown) => {
+      stopped = true;
+      cleanup();
+      stream.pause();
+      encoded.length = 0;
+      reject(error);
+    };
+    const abort = () => fail(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
 
     stream.on("data", (chunk) => {
-      if (exceededLimit) return;
+      if (stopped) return;
       bytes += chunk.length;
       if (bytes > MAX_SINGLE_FILE_BYTES || bytesSoFar + bytes > MAX_TOTAL_UPLOAD_BYTES) {
-        exceededLimit = true;
-        stream.pause();
-        encoded.length = 0;
-        reject(new Error(bytes > MAX_SINGLE_FILE_BYTES
+        fail(new Error(bytes > MAX_SINGLE_FILE_BYTES
           ? `"${path}" exceeds the ${formatMB(MAX_SINGLE_FILE_BYTES)} per-file limit. Remove it from the ZIP and try again.`
           : `This ZIP is larger than the ${formatMB(MAX_TOTAL_UPLOAD_BYTES)} total upload limit. Try splitting it into smaller pushes.`));
         return;
@@ -45,8 +53,9 @@ function readZipFile(entry: JSZip.JSZipObject, path: string, bytesSoFar: number)
         encoded.push(btoa(text.slice(0, boundary)));
         tail = text.slice(boundary);
       }
-    }).on("error", reject).on("end", () => {
-      if (!exceededLimit) {
+    }).on("error", fail).on("end", () => {
+      cleanup();
+      if (!stopped) {
         encoded.push(btoa(tail));
         resolve({ base64: encoded.join(""), bytes });
       }
@@ -59,6 +68,7 @@ export interface ZipExtractHooks {
   onFile: (file: ExtractedFile) => void;
   /** Give the event loop a turn between batches. Wanted on the main thread, pointless in a worker. */
   yieldBetweenBatches: boolean;
+  signal?: AbortSignal;
 }
 
 export async function extractZipEntries(
@@ -66,7 +76,9 @@ export async function extractZipEntries(
   data: Parameters<typeof JSZip.loadAsync>[0],
   hooks: ZipExtractHooks
 ): Promise<void> {
+  hooks.signal?.throwIfAborted();
   const zip = await JSZipClass.loadAsync(data);
+  hooks.signal?.throwIfAborted();
 
   const entries: { path: string; entry: JSZip.JSZipObject }[] = [];
   zip.forEach((relativePath, zipEntry) => {
@@ -97,7 +109,8 @@ export async function extractZipEntries(
   let totalBytes = 0;
   for (const [i, { path, entry }] of entries.entries()) {
     // One stream at a time lets every chunk enforce the remaining ZIP budget.
-    const { base64, bytes } = await readZipFile(entry, path, totalBytes);
+    const { base64, bytes } = await readZipFile(entry, path, totalBytes, hooks.signal);
+    hooks.signal?.throwIfAborted();
     totalBytes += bytes;
     // JSZip exposes Unix mode bits when the archive provides them. A symlink's
     // mode may include execute bits, but its contents are not an executable file.

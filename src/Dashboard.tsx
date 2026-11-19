@@ -199,10 +199,10 @@ export default function Dashboard({
   // folder — since both feed the same extractedFiles pipeline below.
   const [selectedSource, setSelectedSource] = useState<UploadSource | null>(null);
   const sourceVersion = useRef(0);
+  const sourceRead = useRef<AbortController | null>(null);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [extractedFiles, setExtractedFiles] = useState<ExtractedFile[]>([]);
   const [isExtracting, setIsExtracting] = useState(false);
-  const [isReadingFolder, setIsReadingFolder] = useState(false);
   const [extractingName, setExtractingName] = useState("");
 
   const [isUploading, setIsUploading] = useState(false);
@@ -278,6 +278,7 @@ export default function Dashboard({
 
   useEffect(() => () => {
     sourceVersion.current++;
+    sourceRead.current?.abort();
     repoPageRequest.current?.abort();
     repoPageRequest.current = null;
   }, []);
@@ -372,14 +373,16 @@ export default function Dashboard({
 
   const extractSource = async (
     source: UploadSource,
-    read: (onProgress: (path: string) => void) => Promise<ExtractedFile[]>
+    read: (onProgress: (path: string) => void, signal: AbortSignal) => Promise<ExtractedFile[]>
   ) => {
     const version = ++sourceVersion.current;
+    sourceRead.current?.abort();
+    const controller = new AbortController();
+    sourceRead.current = controller;
     setSelectedSource(source);
     setExtractedFiles([]);
     setErrorMsg(null);
     clearPushResult();
-    setIsReadingFolder(false);
     setIsExtracting(true);
     setExtractingName("");
 
@@ -391,7 +394,7 @@ export default function Dashboard({
       nextUpdate = now + 100;
     };
     try {
-      const files = await read(onProgress);
+      const files = await read(onProgress, controller.signal);
       if (sourceVersion.current === version) setExtractedFiles(files);
     } catch (err) {
       if (sourceVersion.current !== version) return;
@@ -400,7 +403,10 @@ export default function Dashboard({
       setErrorMsg(err instanceof Error && err.message ? err.message : fallback);
       setSelectedSource(null);
     } finally {
-      if (sourceVersion.current === version) setIsExtracting(false);
+      if (sourceVersion.current === version) {
+        sourceRead.current = null;
+        setIsExtracting(false);
+      }
     }
   };
 
@@ -411,13 +417,7 @@ export default function Dashboard({
       return;
     }
     trackEvent("zip_uploaded", { size_bytes: file.size });
-    await extractSource({ kind: "zip", name: file.name }, (progress) => extractZip(file, progress));
-  };
-
-  const processFolder = async (files: File[], folderName: string) => {
-    if (!files.length) return;
-    trackEvent("folder_uploaded", { file_count: files.length });
-    await extractSource({ kind: "folder", name: folderName }, (progress) => extractFolder(files, progress));
+    await extractSource({ kind: "zip", name: file.name }, (progress, signal) => extractZip(file, progress, signal));
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -434,7 +434,9 @@ export default function Dashboard({
     // webkitRelativePath looks like "my-project/src/App.tsx" — take the
     // first segment as the folder's display name.
     const folderName = (files[0].webkitRelativePath || files[0].name).split("/")[0];
-    await processFolder(files, folderName);
+    const entries = files.map((file) => ({ file, path: file.webkitRelativePath || file.name }));
+    trackEvent("folder_uploaded", { file_count: entries.length });
+    await extractSource({ kind: "folder", name: folderName }, (progress, signal) => extractFolder(entries, progress, signal));
   };
 
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
@@ -466,26 +468,13 @@ export default function Dashboard({
     const item = e.dataTransfer.items?.[0];
     const entry = item?.kind === "file" ? item.webkitGetAsEntry?.() : null;
     if (entry && entry.isDirectory) {
-      // Walking a folder's entries can take a moment before extraction even
-      // starts (nothing was visibly "loading" here before, which made it
-      // look like the drop had silently failed) — show feedback immediately.
-      const version = ++sourceVersion.current;
-      setIsReadingFolder(true);
-      try {
-        const files = await filesFromDataTransferItems(e.dataTransfer.items);
-        if (sourceVersion.current !== version) return;
-        if (files.length === 0) {
-          setErrorMsg("This folder doesn't contain any files to upload.");
-          return;
-        }
-        await processFolder(files, entry.name);
-      } catch (err) {
-        if (sourceVersion.current === version) {
-          setErrorMsg(err instanceof Error ? err.message : "Could not read the dropped folder. Try again.");
-        }
-      } finally {
-        if (sourceVersion.current === version) setIsReadingFolder(false);
-      }
+      const items = e.dataTransfer.items;
+      await extractSource({ kind: "folder", name: entry.name }, async (progress, signal) => {
+        const files = await filesFromDataTransferItems(items, signal);
+        signal.throwIfAborted();
+        if (files.length) trackEvent("folder_uploaded", { file_count: files.length });
+        return extractFolder(files, progress, signal);
+      });
       return;
     }
 
@@ -732,8 +721,9 @@ export default function Dashboard({
 
   const clearSource = () => {
     sourceVersion.current++;
+    sourceRead.current?.abort();
+    sourceRead.current = null;
     setIsExtracting(false);
-    setIsReadingFolder(false);
     clearPushResult();
     setSelectedSource(null);
     setExtractedFiles([]);
@@ -879,16 +869,14 @@ export default function Dashboard({
     <div
       onClick={(event) => {
         // A programmatic click on either hidden file input bubbles here too.
-        if (isReadingFolder || event.target instanceof HTMLInputElement) return;
+        if (event.target instanceof HTMLInputElement) return;
         warmZipExtractor();
         fileInputRef.current?.click();
       }}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className={`border border-dashed rounded-panel p-6 sm:p-8 flex flex-col items-center justify-center text-center transition-colors ${
-        isReadingFolder ? "cursor-wait" : "cursor-pointer"
-      } ${
+      className={`border border-dashed rounded-panel p-6 sm:p-8 flex flex-col items-center justify-center text-center transition-colors cursor-pointer ${
         isDraggingFile
           ? "border-primary bg-tint-2"
           : "border-field hover:border-muted hover:bg-tint-1"
@@ -909,37 +897,28 @@ export default function Dashboard({
         multiple
       />
       <div className="w-12 h-12 bg-tint-2 border border-edge rounded-full flex items-center justify-center mb-3 text-slate-600 dark:text-slate-300">
-        {isReadingFolder ? <Loader2 className="w-5 h-5 animate-spin" /> : <Upload className="w-5 h-5" />}
+        <Upload className="w-5 h-5" />
       </div>
-      {isReadingFolder ? (
-        <>
-          <p className={`${T.prompt} mb-1`}>Reading folder…</p>
-          <p className="text-muted text-sm">This can take a moment for larger projects</p>
-        </>
-      ) : (
-        <>
-          <p className={`${T.prompt} mb-1`}>{isDesktop ? "Drop a ZIP or folder here" : "Add your ZIP file"}</p>
-          <p className="text-muted text-sm mb-4">
-            {isDesktop ? "ZIP archive or project folder, up to 50MB" : "ZIP archive, up to 50MB"}
-          </p>
-          {/* The whole zone is clickable; this button is the visible, keyboard-reachable
-              way in. Its click bubbles up to the zone, so no handler of its own. */}
-          <button type="button" className={`${BTN} ${BTN_SECONDARY} text-sm`}>
-            <FileArchive className="w-4 h-4" /> Choose ZIP file
-          </button>
-          {isDesktop && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                folderInputRef.current?.click();
-              }}
-              className="mt-2 h-11 px-4 inline-flex items-center gap-2 text-sm text-muted hover:text-ink dark:hover:text-white hover:underline underline-offset-4 transition-colors"
-            >
-              <Folder className="w-4 h-4" /> or select a folder
-            </button>
-          )}
-        </>
+      <p className={`${T.prompt} mb-1`}>{isDesktop ? "Drop a ZIP or folder here" : "Add your ZIP file"}</p>
+      <p className="text-muted text-sm mb-4">
+        {isDesktop ? "ZIP archive or project folder, up to 50MB" : "ZIP archive, up to 50MB"}
+      </p>
+      {/* The whole zone is clickable; this button is the visible, keyboard-reachable
+          way in. Its click bubbles up to the zone, so no handler of its own. */}
+      <button type="button" className={`${BTN} ${BTN_SECONDARY} text-sm`}>
+        <FileArchive className="w-4 h-4" /> Choose ZIP file
+      </button>
+      {isDesktop && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            folderInputRef.current?.click();
+          }}
+          className="mt-2 h-11 px-4 inline-flex items-center gap-2 text-sm text-muted hover:text-ink dark:hover:text-white hover:underline underline-offset-4 transition-colors"
+        >
+          <Folder className="w-4 h-4" /> or select a folder
+        </button>
       )}
     </div>
   );
@@ -954,7 +933,7 @@ export default function Dashboard({
           <p className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">{selectedSource.name}</p>
           <p className="text-sm text-muted truncate">
             {isExtracting
-              ? `Reading ${extractingName || "files"}…`
+              ? `Reading ${extractingName || (selectedSource.kind === "folder" ? "folder" : "files")}…`
               : `${extractedFiles.length} file${extractedFiles.length === 1 ? "" : "s"} ready`}
           </p>
         </div>

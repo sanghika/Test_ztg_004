@@ -26,6 +26,19 @@ describe("runWorkerJob", () => {
     expect(w.terminated).toBe(true);
   });
 
+  it("terminates a canceled worker and ignores any later messages", async () => {
+    const worker = new FakeWorker();
+    const controller = new AbortController();
+    const seen: unknown[] = [];
+    const job = runWorkerJob(asWorker(worker), {}, (message) => seen.push(message), controller.signal);
+    controller.abort();
+
+    await expect(job).rejects.toMatchObject({ name: "AbortError" });
+    expect(worker.terminated).toBe(true);
+    worker.emit({ type: "file", path: "late.txt" });
+    expect(seen).toEqual([]);
+  });
+
   it("passes other messages to onMessage but not 'ready'", async () => {
     const w = new FakeWorker();
     const seen: unknown[] = [];

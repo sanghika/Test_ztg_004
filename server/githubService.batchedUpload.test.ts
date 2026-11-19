@@ -42,7 +42,7 @@ vi.mock("./octokit", () => ({
   }),
 }));
 
-const { createBlobs, commitUpload } = await import("./githubService");
+const { createBlobs, commitUpload, GitHubUploadRateLimitError } = await import("./githubService");
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -169,6 +169,47 @@ describe("createBlobs", () => {
     expect(peak).toBe(5);
     expect(blobs.map((b) => b.sha)).toEqual(files.map((_, i) => `sha-${i}`));
     expect(Date.now() - t0).toBeLessThan(250);
+  });
+
+  it("fails immediately on a GitHub permission denial", async () => {
+    const error = Object.assign(new Error("Permission denied"), { status: 403 });
+    mockCreateBlob.mockRejectedValue(error);
+
+    await expect(createBlobs("fake-token", "me", "repo", [{ path: "a.txt", content: b64("x") }])).rejects.toBe(error);
+    expect(mockCreateBlob).toHaveBeenCalledOnce();
+  });
+
+  it.each([403, 429])("retries GitHub status %s after the indicated rate limit delay", async (status) => {
+    vi.useFakeTimers();
+    const error = Object.assign(new Error("Rate limit hit"), {
+      status, response: { headers: { "retry-after": "2" } },
+    });
+    mockCreateBlob.mockRejectedValueOnce(error).mockResolvedValueOnce({ data: { sha: "blob" } });
+    try {
+      const upload = createBlobs("fake-token", "me", "repo", [{ path: "a.txt", content: b64("x") }]);
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(mockCreateBlob).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(upload).resolves.toEqual([{ path: "a.txt", sha: "blob" }]);
+      expect(mockCreateBlob).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    { status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Date.now() / 1000 + 1200) } },
+    { status: 429, headers: {} },
+  ])("surfaces a rate limit when the wait is too long to retry in this request", async ({ status, headers }) => {
+    mockCreateBlob.mockRejectedValue(Object.assign(new Error("GitHub is limiting requests"), {
+      status, response: { headers },
+    }));
+
+    const upload = createBlobs("fake-token", "me", "repo", [{ path: "a.txt", content: b64("x") }]);
+    await expect(upload).rejects.toBeInstanceOf(GitHubUploadRateLimitError);
+    await expect(upload).rejects.toMatchObject({ status: 429 });
+    if (status === 429) await expect(upload).rejects.toMatchObject({ retryAfterSeconds: 60 });
+    expect(mockCreateBlob).toHaveBeenCalledOnce();
   });
 
   it("explains a push-protection rejection instead of passing the raw error on", async () => {

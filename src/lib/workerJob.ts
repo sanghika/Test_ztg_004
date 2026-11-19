@@ -17,11 +17,27 @@ export const workersSupported = (): boolean => typeof Worker !== "undefined";
 export function runWorkerJob<T>(
   worker: Worker,
   message: unknown,
-  onMessage?: (message: any) => void
+  onMessage?: (message: any) => void,
+  signal?: AbortSignal
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let started = false;
-    const finish = () => worker.terminate();
+    const finish = () => {
+      signal?.removeEventListener("abort", abort);
+      worker.onmessage = null;
+      worker.onerror = null;
+      worker.onmessageerror = null;
+      worker.terminate();
+    };
+    const abort = () => {
+      finish();
+      reject(signal?.reason);
+    };
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    signal?.addEventListener("abort", abort, { once: true });
     worker.onmessage = (event: MessageEvent) => {
       started = true;
       const m = event.data;

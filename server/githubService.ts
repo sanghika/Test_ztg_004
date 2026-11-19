@@ -411,6 +411,25 @@ const explainUploadError = (error: any): never => {
   throw error;
 };
 
+const MAX_BLOB_RETRY_WAIT_MS = 10_000;
+
+export class GitHubUploadRateLimitError extends Error {
+  readonly status = 429;
+  constructor(readonly retryAfterSeconds: number) {
+    super("GitHub is limiting uploads. Try pushing again in " + retryAfterSeconds + " seconds.");
+  }
+}
+
+const readRetryAfterMs = (header: unknown): number | undefined => {
+  if (typeof header !== "string") return undefined;
+  if (/^\d+$/.test(header)) {
+    const seconds = Number(header);
+    return Number.isSafeInteger(seconds) ? seconds * 1000 : undefined;
+  }
+  const timestamp = Date.parse(header);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : undefined;
+};
+
 const createBlobWithRetry = async (
   octokit: Octokit,
   owner: string,
@@ -428,11 +447,20 @@ const createBlobWithRetry = async (
     });
     return data;
   } catch (err: any) {
-    if (retries > 0 && (err.status === 403 || err.status >= 500)) {
-      const waitTime = err.response?.headers?.["retry-after"]
-        ? parseInt(err.response.headers["retry-after"], 10) * 1000
-        : delay;
-      await new Promise((r) => setTimeout(r, waitTime || delay));
+    const headers = err?.response?.headers;
+    const retryAfter = readRetryAfterMs(headers?.["retry-after"]);
+    const primaryLimit = headers?.["x-ratelimit-remaining"] === "0";
+    const upstreamMessage = err?.response?.data?.message ?? err?.message;
+    const rateLimited = err?.status === 429 || (err?.status === 403 && (
+      retryAfter !== undefined || primaryLimit || /(?:secondary|API) rate limit/i.test(String(upstreamMessage))
+    ));
+    const resetMs = primaryLimit ? Number(headers?.["x-ratelimit-reset"]) * 1000 - Date.now() : NaN;
+    const waitMs = retryAfter ?? (rateLimited ? (Number.isFinite(resetMs) && resetMs > 0 ? resetMs : 60_000) : delay);
+    if (rateLimited && (retries <= 0 || waitMs > MAX_BLOB_RETRY_WAIT_MS)) {
+      throw new GitHubUploadRateLimitError(Math.max(1, Math.ceil(waitMs / 1000)));
+    }
+    if (retries > 0 && waitMs <= MAX_BLOB_RETRY_WAIT_MS && (rateLimited || err?.status >= 500)) {
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
       return createBlobWithRetry(octokit, owner, repo, file, retries - 1, delay * 2);
     }
     throw err;
