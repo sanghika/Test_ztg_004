@@ -159,8 +159,18 @@ function SidebarItem({
   );
 }
 
-export default function Dashboard({ account, onDisconnect }: { account: BootstrapData; onDisconnect: () => void }) {
-  const { user, repos: firstPage, nextPage } = account;
+export default function Dashboard({
+  account,
+  onDisconnect,
+  onAuthorizeDelete,
+  deleteAuthorizationError,
+}: {
+  account: BootstrapData;
+  onDisconnect: () => void;
+  onAuthorizeDelete: () => void;
+  deleteAuthorizationError: string | null;
+}) {
+  const { user, repos: firstPage, nextPage, canDeleteRepository } = account;
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [logoutFailed, setLogoutFailed] = useState(false);
   const [repos, setRepos] = useState(firstPage);
@@ -654,7 +664,7 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
     }
   };
 
-  const canConfirmDeleteRepo = !!selectedRepoFullId
+  const canConfirmDeleteRepo = canDeleteRepository && !!selectedRepoFullId
     && deleteRepoConfirmText === selectedRepoFullId
     && !isDeletingRepo
     && !isUploading
@@ -1176,7 +1186,16 @@ export default function Dashboard({ account, onDisconnect }: { account: Bootstra
               <h2 id="danger-title" className={`${T.title} text-red-700 dark:text-red-400 mb-1`}>
                 Danger zone
               </h2>
-              {!showDeleteRepoConfirm ? (
+              {!canDeleteRepository ? (
+                <>
+                  <p className="text-sm text-muted mb-3">GitHub requires separate permission to delete an entire repository.</p>
+                  {deleteAuthorizationError && <Alert variant="error" className="mb-3">{deleteAuthorizationError}</Alert>}
+                  <button type="button" onClick={onAuthorizeDelete} disabled={isLoggingOut}
+                    className={[BTN, BTN_SECONDARY, "text-sm"].join(" ")}>
+                    Authorize repository deletion
+                  </button>
+                </>
+              ) : !showDeleteRepoConfirm ? (
                 <>
                   <p className="text-sm text-muted mb-3">
                     Permanently delete <span className="font-medium break-all text-slate-900 dark:text-slate-100">{selectedRepoFullId}</span> from GitHub. This can’t be undone.

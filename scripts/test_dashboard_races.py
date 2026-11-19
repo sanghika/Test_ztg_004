@@ -124,7 +124,7 @@ class DashboardRaces(unittest.TestCase):
             for i, owner in enumerate(["personal", "company"], start=1)
         ]
         page.route("**/api/bootstrap", lambda route: route.fulfill(json={
-            "user": {"login": "demo", "avatar_url": ""}, "repos": repos, "nextPage": None
+            "user": {"login": "demo", "avatar_url": ""}, "repos": repos, "nextPage": None, "canDeleteRepository": True
         }))
         page.route("**/api/repo-tree?*", lambda route: route.fulfill(json={"tree": [], "truncated": False}))
         requests = []
@@ -153,6 +153,37 @@ class DashboardRaces(unittest.TestCase):
         expect(picker.locator("option[value='company/site']")).to_have_count(0)
         expect(picker.locator("option[value='personal/site']")).to_have_count(1)
         self.assertEqual([{"owner": "company", "repo": "site"}], requests)
+
+    def test_delete_authorization_keeps_the_repo_selected_and_requests_confirmation(self):
+        page = self.page
+        granted = False
+
+        def bootstrap(route):
+            route.fulfill(json={
+                "user": {"login": "demo", "avatar_url": ""},
+                "repos": [{"id": 1, "name": "site", "full_name": "demo/site", "default_branch": "main"}],
+                "nextPage": None,
+                "canDeleteRepository": granted,
+            })
+
+        def consent(route):
+            nonlocal granted
+            granted = True
+            route.fulfill(content_type="text/html", body=
+                '<script>window.opener.postMessage({type:"OAUTH_AUTH_SUCCESS"}, location.origin); window.close();</script>')
+
+        page.route("**/api/bootstrap", bootstrap)
+        page.route("**/api/repo-tree?*", lambda route: route.fulfill(json={"tree": [], "truncated": False}))
+        page.route("**/api/auth/url?intent=delete-repo", lambda route: route.fulfill(json={"url": ORIGIN + "/mock-consent"}))
+        page.context.route("**/mock-consent", consent)
+
+        page.goto(ORIGIN)
+        page.get_by_role("button", name="Manage files").click()
+        expect(page.get_by_role("button", name="Delete repository…")).to_have_count(0)
+        page.get_by_role("button", name="Authorize repository deletion").click()
+        page.get_by_role("button", name="Delete repository…").click()
+        expect(page.get_by_role("combobox", name="Repository")).to_have_value("demo/site")
+        expect(page.get_by_role("button", name="Delete forever")).to_be_disabled()
 
     def test_failed_logout_preserves_dashboard_and_can_retry(self):
         page = self.page

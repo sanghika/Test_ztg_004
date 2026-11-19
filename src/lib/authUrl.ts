@@ -11,8 +11,8 @@ export const AUTH_URL_TTL_MS = 30_000;
 type Entry = { promise: Promise<string>; at: number };
 let entry: Entry | null = null;
 
-async function requestAuthUrl(): Promise<string> {
-  const response = await fetch("/api/auth/url");
+async function requestAuthUrl(path = "/api/auth/url"): Promise<string> {
+  const response = await fetch(path);
   if (!response.ok) throw new Error("Failed to get auth URL");
   const body = await response.json();
   if (typeof body?.url !== "string" || !body.url) throw new Error("Failed to get auth URL");
@@ -44,6 +44,11 @@ export async function takeAuthUrl(): Promise<string> {
     }
   }
   return requestAuthUrl();
+}
+
+/** Start a separate authorization for the repository deletion feature. */
+export function takeDeleteAuthorizationUrl(): Promise<string> {
+  return requestAuthUrl("/api/auth/url?intent=delete-repo");
 }
 
 /** For tests. */

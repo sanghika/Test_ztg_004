@@ -2,7 +2,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback, useSyncExter
 import { Link } from "react-router-dom";
 import type { BootstrapData } from "./lib/github";
 import { trackEvent } from "./lib/analytics";
-import { prefetchAuthUrl, takeAuthUrl } from "./lib/authUrl";
+import { prefetchAuthUrl, takeAuthUrl, takeDeleteAuthorizationUrl } from "./lib/authUrl";
 import { readSessionFlag, clearSessionFlag, sessionPending, endSessionPending } from "./lib/session";
 import { HOME_HEADING } from "./routes";
 import { SECRET_SCAN_NOTE } from "./lib/uploadLimits";
@@ -162,11 +162,15 @@ export default function ZipUploader() {
   const [accountLoadFailed, setAccountLoadFailed] = useState(false);
   const checkAtMount = useRef<boolean | null>(null);
   const accountRequestId = useRef(0);
+  const oauthPopup = useRef<{ window: Window; deletion: boolean } | null>(null);
+  const [deleteAuthorizationError, setDeleteAuthorizationError] = useState<string | null>(null);
 
-  const loadAccount = useCallback(async () => {
+  const loadAccount = useCallback(async (refreshPermissions = false) => {
     const id = ++accountRequestId.current;
-    setAccount(null);
-    setIsCheckingAuth(true);
+    if (!refreshPermissions) {
+      setAccount(null);
+      setIsCheckingAuth(true);
+    }
     setErrorMsg(null);
     setAccountLoadFailed(false);
     // Switch from the head script's pending state to React's loading state.
@@ -181,6 +185,9 @@ export default function ZipUploader() {
       if (id !== accountRequestId.current) return;
       if ((err as { status?: number })?.status === 401) {
         clearSessionFlag();
+        setAccount(null);
+      } else if (refreshPermissions) {
+        setDeleteAuthorizationError("Couldn’t refresh GitHub permissions. Reload the page to check them.");
       } else {
         setAccountLoadFailed(true);
       }
@@ -197,8 +204,10 @@ export default function ZipUploader() {
 
     const handleMessage = (event: MessageEvent) => {
       // The server validates OAuth state before posting this notification.
-      if (event.origin === window.location.origin && event.data?.type === "OAUTH_AUTH_SUCCESS") {
-        void loadAccount();
+      const popup = oauthPopup.current;
+      if (popup && event.source === popup.window && event.origin === window.location.origin && event.data?.type === "OAUTH_AUTH_SUCCESS") {
+        oauthPopup.current = null;
+        void loadAccount(popup.deletion);
       }
     };
 
@@ -209,7 +218,8 @@ export default function ZipUploader() {
     };
   }, [loadAccount]);
 
-  const handleConnect = useCallback(async () => {
+  const openGitHub = useCallback(async (deletion = false) => {
+    const showError = deletion ? setDeleteAuthorizationError : setErrorMsg;
     // Open the popup synchronously, on the click itself — some browsers
     // (notably Safari/iOS) only treat window.open as user-initiated if it
     // happens with no `await` in between, or it gets silently blocked with
@@ -217,33 +227,52 @@ export default function ZipUploader() {
     // we have it, instead of awaiting the fetch first and opening after.
     const authWindow = window.open("", "_blank", "width=600,height=700");
     if (!authWindow) {
-      setErrorMsg("Please allow popups to connect your GitHub account.");
+      showError("Please allow popups to authorize access with GitHub.");
       return;
     }
+    oauthPopup.current?.window.close();
+    const popup = { window: authWindow, deletion };
+    oauthPopup.current = popup;
     try {
-      trackEvent("connect_github_initiated");
-      setErrorMsg(null);
+      if (!deletion) trackEvent("connect_github_initiated");
+      showError(null);
       // The OAuth `state` value is generated and validated entirely
       // server-side (bound to a signed, HttpOnly cookie) — see /api/auth/url
       // and /auth/callback in server.ts. takeAuthUrl() hands back the URL that
       // the button prefetched on hover/focus/touch (src/lib/authUrl.ts), so
       // usually there is nothing left to wait for; otherwise it fetches now.
-      authWindow.location.href = await takeAuthUrl();
-    } catch (err) {
-      console.error(err);
-      setErrorMsg("Failed to start OAuth flow.");
+      const url = await (deletion ? takeDeleteAuthorizationUrl() : takeAuthUrl());
+      if (oauthPopup.current === popup && !authWindow.closed) authWindow.location.href = url;
+    } catch {
+      if (oauthPopup.current === popup) {
+        oauthPopup.current = null;
+        showError("Couldn’t open GitHub authorization. Try again.");
+      }
       authWindow.close();
     }
   }, []);
 
   if (account) {
     const { Dashboard, data } = account;
-    return <Dashboard account={data} onDisconnect={() => setAccount(null)} />;
+    return (
+      <Dashboard
+        account={data}
+        onAuthorizeDelete={() => openGitHub(true)}
+        deleteAuthorizationError={deleteAuthorizationError}
+        onDisconnect={() => {
+          oauthPopup.current?.window.close();
+          oauthPopup.current = null;
+          accountRequestId.current += 1;
+          setDeleteAuthorizationError(null);
+          setAccount(null);
+        }}
+      />
+    );
   }
 
   const connectButton = (
     <button
-      onClick={handleConnect}
+      onClick={() => openGitHub()}
       onPointerEnter={prefetchAuthUrl}
       onPointerDown={prefetchAuthUrl}
       onFocus={prefetchAuthUrl}
@@ -287,7 +316,7 @@ export default function ZipUploader() {
         <div className="flex-1 self-center p-6 lg:p-12">
           <h1 className={`${T.h1} text-ink dark:text-white mb-3`}>Couldn’t load your GitHub account</h1>
           <p role="status" className="text-muted mb-6">Try loading your account again to reopen the dashboard.</p>
-          <button type="button" onClick={loadAccount} className={`${CTRL} px-5 bg-primary text-on-primary hover:bg-primary-hover`}>
+          <button type="button" onClick={() => loadAccount()} className={`${CTRL} px-5 bg-primary text-on-primary hover:bg-primary-hover`}>
             Retry loading account
           </button>
         </div>
