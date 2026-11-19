@@ -43,7 +43,8 @@ export const warmZipExtractor = (): void => {
 
 const extractZipInWorker = async (
   file: File,
-  onProgress?: (filename: string) => void
+  onProgress?: (filename: string) => void,
+  signal?: AbortSignal
 ): Promise<ExtractedFile[]> => {
   const result: ExtractedFile[] = [];
   await runWorkerJob<null>(takeWorker("extract", createExtractWorker), { file }, (m) => {
@@ -51,13 +52,14 @@ const extractZipInWorker = async (
       result.push(...m.files);
       onProgress?.(m.files[m.files.length - 1].path);
     }
-  });
+  }, signal);
   return result;
 };
 
 const extractZipOnMainThread = async (
   file: File,
-  onProgress?: (filename: string) => void
+  onProgress?: (filename: string) => void,
+  signal?: AbortSignal
 ): Promise<ExtractedFile[]> => {
   const result: ExtractedFile[] = [];
   const JSZipClass = await loadJSZip();
@@ -67,6 +69,7 @@ const extractZipOnMainThread = async (
       onProgress?.(entry.path);
     },
     yieldBetweenBatches: true,
+    signal,
   });
   return result;
 };
@@ -77,8 +80,10 @@ const extractZipOnMainThread = async (
 // same code runs on the main thread instead.
 export const extractZip = async (
   file: File,
-  onProgress?: (filename: string) => void
+  onProgress?: (filename: string) => void,
+  signal?: AbortSignal
 ): Promise<ExtractedFile[]> => {
+  signal?.throwIfAborted();
   if (file.size > MAX_RAW_ZIP_BYTES) {
     throw new Error(
       `This ZIP file is ${formatMB(file.size)}, which is over the ${formatMB(MAX_RAW_ZIP_BYTES)} limit. Try a smaller archive.`
@@ -87,19 +92,24 @@ export const extractZip = async (
 
   if (workersSupported()) {
     try {
-      return await extractZipInWorker(file, onProgress);
+      return await extractZipInWorker(file, onProgress, signal);
     } catch (err) {
       // Only "the worker never started" falls back. A real error (a bad ZIP, a
       // size limit) would just happen again, and is reported as it is.
       if (!(err instanceof WorkerUnavailableError)) throw err;
     }
   }
-  return extractZipOnMainThread(file, onProgress);
+  return extractZipOnMainThread(file, onProgress, signal);
 };
 
-const fileToBase64 = (file: File): Promise<string> =>
+const fileToBase64 = (file: File, signal?: AbortSignal): Promise<string> =>
   new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
     const reader = new FileReader();
+    const abort = () => reader.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    reader.onloadend = () => signal?.removeEventListener("abort", abort);
+    reader.onabort = () => reject(signal?.reason);
     reader.onload = () => {
       // reader.result is a data URL like "data:<mime>;base64,<data>" —
       // we only want the part after the comma.
@@ -111,16 +121,34 @@ const fileToBase64 = (file: File): Promise<string> =>
     reader.readAsDataURL(file);
   });
 
+const MAX_CONCURRENT_FOLDER_READS = 6;
+export type FolderFile = { file: File; path: string };
+
+const addFolderBytes = (total: number, file: File, path: string): number => {
+  if (file.size > MAX_SINGLE_FILE_BYTES) {
+    throw new Error(
+      '"' + path + '" is ' + formatMB(file.size) + ', which is over GitHub’s ' +
+      formatMB(MAX_SINGLE_FILE_BYTES) + ' per-file limit. Remove it and try again.'
+    );
+  }
+  const bytes = total + file.size;
+  if (bytes > MAX_TOTAL_UPLOAD_BYTES) {
+    throw new Error("This folder is larger than the " + formatMB(MAX_TOTAL_UPLOAD_BYTES) +
+      " total upload limit. Try removing large or unnecessary files first.");
+  }
+  return bytes;
+};
+
 // Folder extraction happens entirely client-side, mirroring extractZip's
 // validation (size limits, junk-file exclusion, common-root stripping) so a
 // picked/dragged folder feeds the exact same downstream pipeline a ZIP does.
 export const extractFolder = async (
-  files: File[],
-  onProgress?: (filename: string) => void
+  files: FolderFile[],
+  onProgress?: (filename: string) => void,
+  signal?: AbortSignal
 ): Promise<ExtractedFile[]> => {
-  const entries = files
-    .map((file) => ({ file, path: file.webkitRelativePath || file.name }))
-    .filter(({ path }) => !shouldSkipUploadPath(path));
+  signal?.throwIfAborted();
+  const entries = files.filter(({ path }) => !shouldSkipUploadPath(path));
 
   if (entries.length === 0) {
     throw new Error("This folder doesn't contain any files to upload.");
@@ -133,88 +161,82 @@ export const extractFolder = async (
   const rootFolder = firstSegment(entries[0].path);
   const allShareRoot =
     rootFolder !== "" && entries.every((e) => e.path.includes("/") && firstSegment(e.path) === rootFolder);
-  if (allShareRoot) {
-    for (const e of entries) {
-      e.path = e.path.slice(rootFolder.length + 1);
-    }
-  }
-
+  // Check the entire selection before starting any base64 reads.
+  entries.reduce((total, { file, path }) => addFolderBytes(total, file, path), 0);
   const result: ExtractedFile[] = [];
-  let totalBytes = 0;
-  const MAX_CONCURRENT_EXTRACT = 6;
-  for (let i = 0; i < entries.length; i += MAX_CONCURRENT_EXTRACT) {
-    const batch = entries.slice(i, i + MAX_CONCURRENT_EXTRACT);
-
-    // Size limits are checked up front (synchronously, before any reads in
-    // this batch) so an oversized file fails fast without paying for the
-    // FileReader round trip on it or its batch-mates first.
-    for (const { file, path } of batch) {
-      if (file.size > MAX_SINGLE_FILE_BYTES) {
-        throw new Error(
-          `"${path}" is ${formatMB(file.size)}, which is over GitHub's ${formatMB(MAX_SINGLE_FILE_BYTES)} per-file limit. Remove it and try again.`
-        );
-      }
-      totalBytes += file.size;
-      if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
-        throw new Error(
-          `This folder is larger than the ${formatMB(MAX_TOTAL_UPLOAD_BYTES)} total upload limit. Try removing large/unnecessary files (e.g. node_modules, build output) first.`
-        );
-      }
-    }
-
+  for (let i = 0; i < entries.length; i += MAX_CONCURRENT_FOLDER_READS) {
+    signal?.throwIfAborted();
+    const batch = entries.slice(i, i + MAX_CONCURRENT_FOLDER_READS);
     const batchResults = await Promise.all(
-      batch.map(async ({ file, path }) => ({ path, content: await fileToBase64(file) }))
+      batch.map(async ({ file, path }) => ({
+        path: allShareRoot ? path.slice(rootFolder.length + 1) : path,
+        content: await fileToBase64(file, signal),
+      }))
     );
+    signal?.throwIfAborted();
     for (const { path } of batchResults) onProgress?.(path);
     result.push(...batchResults);
-
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
+  signal?.throwIfAborted();
   return result;
 };
 
-// Recursively walks a dropped folder's DataTransferItem entries into a flat
-// File[] with webkitRelativePath set, so a dragged folder can be fed through
-// extractFolder exactly like one chosen via the <input webkitdirectory>
-// picker. Falls back gracefully if the browser doesn't support this API.
-export const filesFromDataTransferItems = async (items: DataTransferItemList): Promise<File[]> => {
-  const readEntry = async (entry: FileSystemEntry, pathPrefix: string): Promise<File[]> => {
-    const path = pathPrefix + entry.name;
-    if (shouldSkipUploadPath(path)) return [];
-
+// Browser directory readers return small batches. Yield files as they are found
+// so a large tree is neither opened all at once nor fully read before validation.
+export const filesFromDataTransferItems = async (items: DataTransferItemList, signal?: AbortSignal): Promise<FolderFile[]> => {
+  type FileEntry = { entry: FileSystemFileEntry; path: string };
+  async function* walk(entry: FileSystemEntry, prefix: string): AsyncGenerator<FileEntry> {
+    signal?.throwIfAborted();
+    const path = prefix + entry.name;
+    if (shouldSkipUploadPath(path)) return;
     if (entry.isFile) {
-      const file = await new Promise<File>((resolve, reject) => {
-        (entry as FileSystemFileEntry).file(resolve, () => reject(new Error(`Could not read "${path}".`)));
-      });
-      try {
-        Object.defineProperty(file, "webkitRelativePath", { value: path, configurable: true });
-      } catch {
-        // Some browsers already provide this property or disallow overriding it.
+      yield { entry: entry as FileSystemFileEntry, path };
+    } else if (entry.isDirectory) {
+      const reader = (entry as FileSystemDirectoryEntry).createReader();
+      for (;;) {
+        const entries = await new Promise<FileSystemEntry[]>((resolve, reject) => {
+          reader.readEntries(resolve, () => reject(new Error('Could not read folder "' + path + '".')));
+        });
+        signal?.throwIfAborted();
+        if (!entries.length) return;
+        for (const child of entries) yield* walk(child, path + "/");
       }
-      return [file];
     }
-    if (!entry.isDirectory) return [];
+  }
 
-    const reader = (entry as FileSystemDirectoryEntry).createReader();
-    const entries: FileSystemEntry[] = [];
-    while (true) {
-      const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => {
-        reader.readEntries(resolve, () => reject(new Error(`Could not read folder "${path}".`)));
+  // Snapshot the handles before awaiting. Browsers only expose these during drop.
+  const roots = Array.from(items)
+    .map((item) => item.kind === "file" ? item.webkitGetAsEntry?.() : null);
+  const files: FolderFile[] = [];
+  let bytes = 0;
+  let batch: FileEntry[] = [];
+  const readBatch = async () => {
+    signal?.throwIfAborted();
+    const found = await Promise.all(batch.map(async ({ entry, path }) => {
+      const file = await new Promise<File>((resolve, reject) => {
+        entry.file(resolve, () => reject(new Error('Could not read "' + path + '".')));
       });
-      if (!batch.length) break;
-      entries.push(...batch);
+      return { file, path };
+    }));
+    signal?.throwIfAborted();
+    for (const { file, path } of found) {
+      bytes = addFolderBytes(bytes, file, path);
+      files.push({ file, path });
     }
-    const nested = await Promise.all(entries.map((child) => readEntry(child, path + "/")));
-    return nested.flat();
+    batch = [];
   };
-
-  const topLevel = Array.from(items)
-    .map((item) => (item.kind === "file" ? item.webkitGetAsEntry?.() : null))
-    .filter((entry): entry is FileSystemEntry => !!entry);
-
-  const nested = await Promise.all(topLevel.map((entry) => readEntry(entry, "")));
-  return nested.flat();
+  for (const root of roots) {
+    if (!root) continue;
+    for await (const fileEntry of walk(root, "")) {
+      batch.push(fileEntry);
+      if (batch.length === MAX_CONCURRENT_FOLDER_READS) await readBatch();
+    }
+  }
+  if (batch.length) await readBatch();
+  signal?.throwIfAborted();
+  return files;
 };
 
 // --- Authenticated calls to our own server, which holds the GitHub token --- //

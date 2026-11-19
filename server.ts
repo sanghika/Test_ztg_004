@@ -596,6 +596,9 @@ export async function createApp() {
       // Clearing both cookies stops the flag from being re-issued for it.
       clearSession(res);
     }
+    if (err instanceof githubService.GitHubUploadRateLimitError) {
+      res.setHeader("Retry-After", String(err.retryAfterSeconds));
+    }
     const message = err?.response?.data?.message || err?.message || "GitHub API error.";
     res.status(status).json({ message });
   }
