@@ -31,10 +31,21 @@ class PublicRoutes(unittest.TestCase):
         expect(page.get_by_role("heading", name="Page not found")).to_be_visible()
         expect(page.get_by_role("link", name="Go to homepage")).to_have_attribute("href", "/")
         expect(page.locator('meta[name="robots"]')).to_have_attribute("content", "noindex, follow")
-        for path, expected in [("/index.html", "/"), ("/faq/index.html?from=legacy", "/faq?from=legacy")]:
-            response = page.goto(ORIGIN + path)
-            self.assertEqual(308, response.request.redirected_from.response().status)
-            self.assertEqual(ORIGIN + expected, page.url)
+        for path, expected in [
+            ("/index.html", "/"),
+            ("/FAQ/index.html?from=legacy", "/faq?from=legacy"),
+            ("/FAQ", "/faq"),
+            ("/faq/?utm_source=test&via=%2F", "/faq?utm_source=test&via=%2F"),
+            ("/f%61q", "/faq"),
+        ]:
+            response = context.request.get(ORIGIN + path, max_redirects=0)
+            self.assertEqual(308, response.status, path)
+            self.assertEqual(expected, response.headers["location"])
+        canonical = context.request.get(f"{ORIGIN}/faq?utm_source=test", max_redirects=0)
+        self.assertEqual(200, canonical.status)
+        alias_head = context.request.head(f"{ORIGIN}/FAQ/", max_redirects=0)
+        self.assertEqual(308, alias_head.status)
+        self.assertEqual("/faq", alias_head.headers["location"])
         asset = context.request.get(f"{ORIGIN}/assets/missing.js")
         self.assertEqual(404, asset.status)
         self.assertIn("text/plain", asset.headers["content-type"])

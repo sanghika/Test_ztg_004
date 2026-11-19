@@ -575,6 +575,12 @@ export async function createApp() {
       if (!copies || !sendPrecompressed(req, res, copies, sendOptions, sendPlain)) sendPlain();
     };
 
+    const redirectToPage = (req: express.Request, res: express.Response, canonicalPath: string) => {
+      const queryAt = req.originalUrl.indexOf("?");
+      const query = queryAt === -1 ? "" : req.originalUrl.slice(queryAt);
+      return res.redirect(308, canonicalPath + query);
+    };
+
     // Redirect direct links to prerendered HTML before static middleware serves them.
     app.use((req, res, next) => {
       if (req.method !== "GET" && req.method !== "HEAD") return next();
@@ -592,8 +598,7 @@ export async function createApp() {
       if (filename !== "index.html") return next();
       const page = findPublicPage(directory || "/");
       if (!page) return next();
-      const queryAt = req.originalUrl.indexOf("?");
-      return res.redirect(308, page.path + (queryAt === -1 ? "" : req.originalUrl.slice(queryAt)));
+      return redirectToPage(req, res, page.path);
     });
 
     app.use(servePrecompressed(precompressed, sendOptions));
@@ -613,7 +618,10 @@ export async function createApp() {
 
     app.get("*", (req, res) => {
       const page = findPublicPage(req.path);
-      if (page) return sendPage(req, res, pageFiles.get(page.path)!);
+      if (page) {
+        if (req.path !== page.path) return redirectToPage(req, res, page.path);
+        return sendPage(req, res, pageFiles.get(page.path)!);
+      }
       // Keep missing asset and API responses out of the HTML error page.
       if (req.path.startsWith("/api/") || (hasFileExtension(req.path) && !/\.html?$/i.test(req.path))) {
         return res.status(404).setHeader("Cache-Control", "no-cache").type("text/plain").send("Not found");

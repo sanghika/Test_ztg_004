@@ -26,6 +26,7 @@ describe("renderPage", () => {
     expect(html).toContain('<div id="root" data-prerendered="/faq"><h1>FAQ</h1></div>');
     expect(html).not.toContain(ROOT_MARKER);
     expect(html).toContain('<script type="module" src="/assets/index.js"></script>');
+    expect(html).not.toContain('application/ld+json');
   });
 
   it("gives a content page its own title, description, canonical and og:url", () => {
@@ -58,6 +59,11 @@ describe("renderPage", () => {
     expect(html).toContain('content="Home description"');
     expect(html).toContain('<link rel="canonical" href="https://ziptogit.in/" />');
     expect(html).toContain('data-prerendered="/"');
+  });
+
+  it("declares the preferred site name on the homepage", () => {
+    const html = renderPage(template, { path: "/" }, "<h1>Hero</h1>", ORIGIN);
+    expect(html).toContain('<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"ZiptoGit","url":"https://ziptogit.in/"}</script>');
   });
 
   it("escapes quotes and angle brackets in attribute and title text", () => {
