@@ -33,6 +33,16 @@ export function renderPage(template, route, appHtml, origin) {
   );
 
   const url = origin + route.path;
+  if (route.path === "/") {
+    const site = JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "WebSite",
+      name: "ZiptoGit",
+      url,
+    }).replace(/</g, "\\u003c");
+    html = replaceOnce(html, /<\/head>/, () => `<script type="application/ld+json">${site}</script>\n  </head>`, "</head>");
+  }
+
   const setAttribute = (pattern, value, label) => {
     html = replaceOnce(html, pattern, (_, a, b) => a + escapeAttr(value) + b, label);
   };
