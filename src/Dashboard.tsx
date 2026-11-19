@@ -412,7 +412,8 @@ export default function Dashboard({
 
   const processFile = async (file: File | undefined) => {
     if (!file) return;
-    if (file.type !== "application/zip" && !file.name.endsWith(".zip")) {
+    const zipMime = file.type === "application/zip" || file.type === "application/x-zip-compressed";
+    if (!zipMime && !file.name.toLowerCase().endsWith(".zip")) {
       setErrorMsg("Please select a valid ZIP file.");
       return;
     }
@@ -882,7 +883,7 @@ export default function Dashboard({
           : "border-field hover:border-muted hover:bg-tint-1"
       }`}
     >
-      <input type="file" accept=".zip,application/zip" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
+      <input type="file" accept=".zip,application/zip,application/x-zip-compressed" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
       {/* Folder picking relies on the non-standard `webkitdirectory` attribute,
           which iOS Safari doesn't support and Android's file browser exposes
           inconsistently, so it is desktop-only; phones always have the ZIP path. */}

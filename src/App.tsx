@@ -2,6 +2,7 @@ import { Component, useState, useEffect, useLayoutEffect, useRef, useCallback, F
 import { BrowserRouter, Routes, Route, Link, useLocation, useNavigationType } from "react-router-dom";
 import { trackPageView } from "./lib/analytics";
 import { findPublicPage, NOT_FOUND_PAGE, SITE_ORIGIN } from "./routes";
+import { WEBSITE_SCHEMA_ID, websiteStructuredData } from "./siteStructuredData.mjs";
 import { MAX_TOTAL_UPLOAD_BYTES, SECRET_SCAN_NOTE } from "./lib/uploadLimits";
 import { Github, Sun, Moon, Menu, X } from "lucide-react";
 import { CARD_EDGE, CTRL, StepBadge, T } from "./components/ui";
@@ -226,6 +227,16 @@ function RouteEffects() {
     for (const [selector, content] of Object.entries(tags)) {
       document.querySelector(selector)?.setAttribute("content", content);
     }
+    const websiteSchema = document.getElementById(WEBSITE_SCHEMA_ID);
+    if (page.path !== "/") {
+      websiteSchema?.remove();
+    } else if (!websiteSchema) {
+      const script = document.createElement("script");
+      script.id = WEBSITE_SCHEMA_ID;
+      script.type = "application/ld+json";
+      script.textContent = websiteStructuredData(SITE_ORIGIN);
+      document.head.appendChild(script);
+    }
     trackPageView();
   }, [pathname]);
 
@@ -416,7 +427,7 @@ function ContactPage() {
 
         <div className="inline-flex flex-col items-start gap-2 p-6 bg-tint-1 rounded-panel border border-edge">
           <span className={`${T.eyebrow} text-muted`}>Support email</span>
-          <a href="mailto:siteget1234@gmail.com" className="inline-flex items-center min-h-11 text-lg font-medium text-ink dark:text-white hover:underline">siteget1234@gmail.com</a>
+          <a href="mailto:support@ziptogit.in" className="inline-flex items-center min-h-11 text-lg font-medium text-ink dark:text-white hover:underline">support@ziptogit.in</a>
         </div>
       </div>
     </PageLayout>

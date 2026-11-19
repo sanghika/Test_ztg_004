@@ -82,11 +82,11 @@ class DashboardRaces(unittest.TestCase):
         picker.set_input_files(archive("first"))
         page.wait_for_function("window.firstZipStarted")
         page.get_by_role("button", name="Remove selected files").click()
-        picker.set_input_files(archive("second"))
+        picker.set_input_files({**archive("second"), "name": "second.ZIP", "mimeType": "application/x-zip-compressed"})
         push = page.get_by_role("button", name="Push files", exact=True).last
         expect(push).to_be_enabled()
         self.assertTrue(page.evaluate("window.firstZipCanceled"))
-        expect(page.get_by_text("second.zip", exact=True)).to_be_visible()
+        expect(page.get_by_text("second.ZIP", exact=True)).to_be_visible()
         push.click()
         expect(page.get_by_role("button", name="Push more files")).to_be_visible()
         self.assertEqual([["second.txt"]], [[e["path"] for e in c["entries"]] for c in commits])
@@ -111,7 +111,7 @@ class DashboardRaces(unittest.TestCase):
         page.get_by_role("combobox", name="Repository").select_option("demo/second")
         page.get_by_text("second.md", exact=True).click()
         self.assertEqual("first", pending[0].request.post_data_json["repo"])
-        pending[0].fulfill(content_type="application/x-ndjson", body='{"done":true,"commit":{}}\n')
+        pending[0].fulfill(content_type="application/x-ndjson", body='{"done":true,"commit":{"sha":"committed"}}\n')
         # Re-enabling this selection means the pending deletion has settled.
         expect(delete).to_be_enabled()
         expect(page.get_by_text("second.md", exact=True)).to_be_visible()

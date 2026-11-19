@@ -14,7 +14,7 @@
     "analyze": "npx --yes vite-bundle-visualizer",
     "screenshots": "node scripts/screenshots.mjs",
     "clean": "rm -rf dist dist-ssr dist-server server.js",
-    "lint": "tsc --noEmit && eslint \"**/*.{ts,tsx}\"",
+    "lint": "tsc --noEmit && eslint \"**/*.{ts,tsx,mjs}\"",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:browser": "python3 -m unittest discover -s scripts -p 'test_*.py'"

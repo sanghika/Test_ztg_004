@@ -5,6 +5,7 @@ With Python Playwright and Chromium installed, run python scripts/test_public_ro
 Set CHROMIUM_PATH to use a system Chromium. Set ZTG_TEST_ORIGIN for a custom port.
 """
 
+import json
 import os
 import unittest
 
@@ -59,8 +60,12 @@ class PublicRoutes(unittest.TestCase):
         faq.scroll_into_view_if_needed()
         page.wait_for_function("scrollY > 0")
         previous_scroll = page.evaluate("scrollY")
+        schema = page.locator('head script[type="application/ld+json"]')
+        expect(schema).to_have_count(1)
+        self.assertEqual("https://ziptogit.in/", json.loads(schema.text_content())["url"])
         faq.click()
         expect(page).to_have_title("GitHub ZIP uploads: limits, permissions and pricing | ZiptoGit")
+        expect(schema).to_have_count(0)
         expect(page.get_by_role("heading", level=1)).to_be_focused()
         self.assertEqual(0, page.evaluate("scrollY"))
         expect(page.locator('link[rel="canonical"]')).to_have_attribute("href", "https://ziptogit.in/faq")
@@ -69,6 +74,7 @@ class PublicRoutes(unittest.TestCase):
             "Find out what you can upload to GitHub with ZiptoGit, how much it costs, and which permissions it requests for public and private repositories.")
         page.go_back()
         expect(page).to_have_title("ZiptoGit - Push ZIP Archives Directly to GitHub")
+        expect(schema).to_have_count(1)
         self.assertEqual(previous_scroll, page.evaluate("scrollY"))
 
     def test_uploader_loads_only_when_navigating_to_home(self):
@@ -89,6 +95,35 @@ class PublicRoutes(unittest.TestCase):
         page.reload()
         self.assertEqual(1, page.locator('link[rel="modulepreload"][href*="/ZipUploader-"]').count())
         expect(heading).to_be_visible()
+
+    def test_production_content_policy_allows_startup_and_blocks_framing(self):
+        page = self.browser.new_page(color_scheme="dark", viewport={"width": 1280, "height": 800})
+        self.addCleanup(page.close)
+        page.add_init_script("""
+            window.policyViolations = [];
+            document.addEventListener('securitypolicyviolation', event => {
+              window.policyViolations.push(event.effectiveDirective);
+            });
+        """)
+        response = page.goto(f"{ORIGIN}/")
+        self.assertEqual("DENY", response.headers["x-frame-options"])
+        policy = response.headers["content-security-policy"]
+        self.assertIn("frame-ancestors 'none'", policy)
+        scripts = next(rule for rule in policy.split("; ") if rule.startswith("script-src "))
+        self.assertEqual(2, scripts.count("'sha256-"))
+        self.assertNotIn("'unsafe-inline'", scripts)
+        expect(page.locator("html")).to_have_class("dark")
+        page.get_by_role("button", name="Switch to light mode").click()
+        expect(page.locator("html")).to_have_class("")
+        self.assertEqual([], page.evaluate("window.policyViolations"))
+
+    def test_contact_uses_the_support_address(self):
+        page = self.browser.new_page(java_script_enabled=False)
+        self.addCleanup(page.close)
+        page.goto(f"{ORIGIN}/contact")
+        expect(page.get_by_role("link", name="support@ziptogit.in")).to_have_attribute(
+            "href", "mailto:support@ziptogit.in"
+        )
 
     def test_failed_uploader_download_can_be_recovered_by_reloading(self):
         page = self.browser.new_page()

@@ -246,6 +246,12 @@ describe("has_session flag cookie", () => {
     expect(flag).not.toContain("HttpOnly");
     expect(flag).not.toContain("gho_test_token");
     expect(findCookie(res, "gh_delete_permission")).toMatch(/^gh_delete_permission=;/);
+
+    const callbackScript = res.text.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? "";
+    const hash = crypto.createHash("sha256").update(callbackScript).digest("base64");
+    expect(callbackScript).toContain("OAUTH_AUTH_SUCCESS");
+    expect(res.headers["content-security-policy"]).toContain("script-src 'sha256-" + hash + "'");
+    expect(res.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
   });
 
   it("is added to a page request that carries a valid session but no flag (sessions from before the flag existed)", async () => {
